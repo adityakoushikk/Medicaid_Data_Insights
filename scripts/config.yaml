@@ -1,0 +1,52 @@
+# ── I/O defaults ──────────────────────────────────────────────────────────────
+default_output_csv: "provider_level.csv"
+
+# ── Data filtering ────────────────────────────────────────────────────────────
+# Only months on or before this date are used.
+date_cutoff: "2024-12-31"
+
+# Providers with fewer observed months than this receive insufficient_history_flag=1.
+# This is NOT a hard exclusion — features are built for all providers.
+min_months_default: 18
+
+# ── Flagged-month detection ───────────────────────────────────────────────────
+# Rolling window size (number of prior OBSERVED rows, not calendar months).
+robust_z_window: 8
+
+# |robust z| above this threshold → month is flagged as anomalous.
+robust_z_threshold: 3.0
+
+# Last-N observed rows used for the recent-flag-count feature.
+flag_recent_months: 6
+
+# ── Growth / drop normalization ───────────────────────────────────────────────
+# Minimum prior paid_t (dollars) before computing a pct growth step.
+# Prevents blow-up when prior month is near zero.
+mom_min_denominator: 10.0
+
+# ── Code-mix shift thresholds ─────────────────────────────────────────────────
+# Monthlyized entropy change above this → counted as a "high code-mix shift" month.
+high_entropy_change: 0.15
+
+# Monthlyized HHI change above this → counted as a "high concentration shift" month.
+high_hhi_change: 0.05
+
+# HHI above this value → month is classified as "high concentration".
+high_concentration_hhi: 0.6
+
+# ── Changepoint detection (PELT) ──────────────────────────────────────────────
+# Penalty for the PELT algorithm.  Higher values → fewer breakpoints detected.
+changepoint_penalty: 10.0
+
+# Cost model passed to ruptures.Pelt. Options: "rbf", "l1", "l2", "normal", "ar".
+changepoint_model: "rbf"
+
+# Minimum segment size (observed rows) for PELT.
+changepoint_min_size: 3
+
+# Minimum observed months required to run changepoint detection.
+changepoint_min_obs: 6
+
+# ── Fraction thresholds ───────────────────────────────────────────────────────
+# top-3 code paid share above this → counted toward fraction_months_top3_above_80pct.
+top3_high_threshold: 0.80

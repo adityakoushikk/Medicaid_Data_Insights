@@ -267,6 +267,11 @@ def compute_ratio_features(provider_month_df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _merge_to_panel(provider_month_df: pd.DataFrame, features_df: pd.DataFrame) -> pd.DataFrame:
+    """Left-join features_df onto provider_month_df on (billing_provider_npi, month)."""
+    return provider_month_df.merge(features_df, on=["billing_provider_npi", "month"], how="left")
+
+
 def _entropy(probs: np.ndarray) -> float:
     """Shannon entropy -sum(p*log(p)); p must be non-negative and sum to 1."""
     p = np.asarray(probs).ravel()
@@ -282,6 +287,38 @@ def _hhi(probs: np.ndarray) -> float:
     return float(np.sum(p ** 2))
 
 
+def _compute_col_stats(g, code_level: pd.DataFrame, col: str, prefix: str) -> pd.DataFrame:
+    """Compute distribution stats for one code-level column; returns a MultiIndexed DataFrame."""
+    def q1(x): return x.quantile(0.25)
+    def q3(x): return x.quantile(0.75)
+
+    stats = g[col].agg([
+        ("mean", "mean"), ("median", "median"), ("max", "max"), ("min", "min"),
+        ("std", "std"), ("iqr", lambda x: q3(x) - q1(x)),
+        ("mad", lambda x: (x - x.median()).abs().median()),
+        ("skew", "skew"), ("kurt", "kurt"),
+    ]).rename(columns=lambda c: (
+        f"{c}_{prefix}_single_code" if c in ("max", "min") else f"{c}_{prefix}_per_code"
+    ))
+    stats[f"{prefix}_code_range"] = (
+        stats[f"max_{prefix}_single_code"] - stats[f"min_{prefix}_single_code"]
+    )
+    stats[f"{prefix}_code_energy"] = g[col].apply(lambda x: (x ** 2).sum())
+    above_mean = (
+        code_level.assign(
+            _mean=code_level.groupby(["billing_provider_npi", "month"])[col].transform("mean")
+        )
+        .query(f"{col} > _mean")
+        .groupby(["billing_provider_npi", "month"])
+        .size()
+        .reindex(stats.index)
+        .fillna(0)
+        .astype(int)
+    )
+    stats[f"num_codes_above_mean_{prefix}"] = above_mean
+    return stats
+
+
 def compute_code_mix_features(
     code_level: pd.DataFrame, provider_month_df: pd.DataFrame
 ) -> pd.DataFrame:
@@ -289,65 +326,47 @@ def compute_code_mix_features(
     Add top_code_paid_share, top_code_claim_share, top_3 variants, hcpcs_entropy,
     hcpcs_hhi, top_hcpcs_code_t. Merge back to provider_month_df.
     """
-    # Code-level totals per provider-month (already summed in code_level)
-    g = code_level.groupby(["billing_provider_npi", "month"])
+    grp_keys = ["billing_provider_npi", "month"]
+    g = code_level.groupby(grp_keys)
 
-    # Paid and claims totals at provider-month (from code_level sums)
-    pm_paid = g["code_paid"].sum()
-    pm_claims = g["code_claims"].sum()
+    paid_total = g["code_paid"].sum()
+    claims_total = g["code_claims"].sum()
 
-    rows = []
-    for (npi, month), sub in g:
-        paid_tot = sub["code_paid"].sum()
-        claims_tot = sub["code_claims"].sum()
-        paid = sub["code_paid"].values
-        claims = sub["code_claims"].values
+    top_code_paid_share = (g["code_paid"].max() / paid_total).where(paid_total > 0)
+    top_code_claim_share = (g["code_claims"].max() / claims_total).where(claims_total > 0)
 
-        if paid_tot and paid_tot > 0:
-            p_paid = paid / paid_tot
-            top_code_paid_share = float(np.max(paid) / paid_tot)
-            top_3_paid = np.partition(paid, -min(3, len(paid)))[-min(3, len(paid)):].sum()
-            top_3_code_paid_share = float(top_3_paid / paid_tot)
-            hcpcs_entropy = _entropy(p_paid)
-            hcpcs_hhi = _hhi(p_paid)
-            top_hcpcs_code_t = str(sub.loc[sub["code_paid"].idxmax(), "hcpcs_code"])
-        else:
-            top_code_paid_share = np.nan
-            top_3_code_paid_share = np.nan
-            hcpcs_entropy = 0.0 if len(paid) <= 1 else np.nan
-            hcpcs_hhi = np.nan
-            top_hcpcs_code_t = ""  # no codes; keep string type
+    def _top3_sum(x):
+        n = min(3, len(x))
+        return float(np.partition(x.values, -n)[-n:].sum())
 
-        if claims_tot and claims_tot > 0:
-            p_claims = claims / claims_tot
-            top_code_claim_share = float(np.max(claims) / claims_tot)
-            top_3_claims = np.partition(claims, -min(3, len(claims)))[
-                -min(3, len(claims)) :
-            ].sum()
-            top_3_code_claim_share = float(top_3_claims / claims_tot)
-        else:
-            top_code_claim_share = np.nan
-            top_3_code_claim_share = np.nan
+    top_3_code_paid_share = (g["code_paid"].apply(_top3_sum) / paid_total).where(paid_total > 0)
+    top_3_code_claim_share = (g["code_claims"].apply(_top3_sum) / claims_total).where(claims_total > 0)
 
-        rows.append(
-            {
-                "billing_provider_npi": npi,
-                "month": month,
-                "top_code_paid_share": top_code_paid_share,
-                "top_code_claim_share": top_code_claim_share,
-                "top_3_code_paid_share": top_3_code_paid_share,
-                "top_3_code_claim_share": top_3_code_claim_share,
-                "hcpcs_entropy": hcpcs_entropy,
-                "hcpcs_hhi": hcpcs_hhi,
-                "top_hcpcs_code_t": top_hcpcs_code_t,
-            }
-        )
+    paid_tot_t = code_level.groupby(grp_keys)["code_paid"].transform("sum")
+    p_paid = code_level["code_paid"].div(paid_tot_t.replace(0, np.nan)).fillna(0.0)
+    cl = code_level.assign(_p_paid=p_paid)
+    hcpcs_entropy = cl.groupby(grp_keys)["_p_paid"].apply(_entropy)
+    hcpcs_hhi = cl.groupby(grp_keys)["_p_paid"].apply(_hhi)
 
-    mix_df = pd.DataFrame(rows)
-    out = provider_month_df.merge(
-        mix_df, on=["billing_provider_npi", "month"], how="left"
+    top_idx = g["code_paid"].idxmax()
+    top_hcpcs = (
+        code_level.loc[top_idx.values, "hcpcs_code"]
+        .astype(str)
+        .set_axis(top_idx.index)
+        .where(paid_total > 0, "")
     )
-    return out
+
+    mix_df = pd.DataFrame({
+        "top_code_paid_share": top_code_paid_share,
+        "top_code_claim_share": top_code_claim_share,
+        "top_3_code_paid_share": top_3_code_paid_share,
+        "top_3_code_claim_share": top_3_code_claim_share,
+        "hcpcs_entropy": hcpcs_entropy,
+        "hcpcs_hhi": hcpcs_hhi,
+        "top_hcpcs_code_t": top_hcpcs,
+    }).reset_index()
+
+    return _merge_to_panel(provider_month_df, mix_df)
 
 
 def compute_code_distribution_features(
@@ -358,81 +377,10 @@ def compute_code_distribution_features(
     for paid and claims, plus num_codes_above_mean_*, paid_code_energy, claims_code_energy.
     """
     g = code_level.groupby(["billing_provider_npi", "month"])
-
-    def q1(x):
-        return x.quantile(0.25)
-
-    def q3(x):
-        return x.quantile(0.75)
-
-    paid_stats = g["code_paid"].agg(
-        [
-            ("mean_paid_per_code", "mean"),
-            ("median_paid_per_code", "median"),
-            ("max_paid_single_code", "max"),
-            ("min_paid_single_code", "min"),
-            ("std_paid_per_code", "std"),
-            ("iqr_paid_per_code", lambda x: q3(x) - q1(x)),
-            ("mad_paid_per_code", lambda x: (x - x.median()).abs().median()),
-            ("skew_paid_per_code", "skew"),
-            ("kurt_paid_per_code", "kurt"),
-        ]
-    )
-    paid_stats["paid_code_range"] = (
-        paid_stats["max_paid_single_code"] - paid_stats["min_paid_single_code"]
-    )
-    paid_stats["paid_code_energy"] = g["code_paid"].apply(lambda x: (x ** 2).sum())
-    paid_above_mean = (
-        code_level.assign(
-            mean_p=code_level.groupby(["billing_provider_npi", "month"])["code_paid"].transform("mean")
-        )
-        .query("code_paid > mean_p")
-        .groupby(["billing_provider_npi", "month"])
-        .size()
-        .reindex(paid_stats.index)
-        .fillna(0)
-        .astype(int)
-    )
-    paid_stats["num_codes_above_mean_paid"] = paid_above_mean
-
-    claims_stats = g["code_claims"].agg(
-        [
-            ("mean_claims_per_code", "mean"),
-            ("median_claims_per_code", "median"),
-            ("max_claims_single_code", "max"),
-            ("min_claims_single_code", "min"),
-            ("std_claims_per_code", "std"),
-            ("iqr_claims_per_code", lambda x: q3(x) - q1(x)),
-            ("mad_claims_per_code", lambda x: (x - x.median()).abs().median()),
-            ("skew_claims_per_code", "skew"),
-            ("kurt_claims_per_code", "kurt"),
-        ]
-    )
-    claims_stats["claims_code_range"] = (
-        claims_stats["max_claims_single_code"] - claims_stats["min_claims_single_code"]
-    )
-    claims_stats["claims_code_energy"] = g["code_claims"].apply(lambda x: (x ** 2).sum())
-    claims_above_mean = (
-        code_level.assign(
-            mean_c=code_level.groupby(["billing_provider_npi", "month"])["code_claims"].transform("mean")
-        )
-        .query("code_claims > mean_c")
-        .groupby(["billing_provider_npi", "month"])
-        .size()
-        .reindex(claims_stats.index)
-        .fillna(0)
-        .astype(int)
-    )
-    claims_stats["num_codes_above_mean_claims"] = claims_above_mean
-
-    dist_df = paid_stats.join(claims_stats, lsuffix="", rsuffix="_r")
-    dist_df = dist_df[[c for c in dist_df.columns if not c.endswith("_r")]]
-    dist_df = dist_df.reset_index()
-
-    out = provider_month_df.merge(
-        dist_df, on=["billing_provider_npi", "month"], how="left"
-    )
-    return out
+    paid_stats = _compute_col_stats(g, code_level, "code_paid", "paid")
+    claims_stats = _compute_col_stats(g, code_level, "code_claims", "claims")
+    dist_df = paid_stats.join(claims_stats).reset_index()
+    return _merge_to_panel(provider_month_df, dist_df)
 
 
 def build_provider_month_df(
@@ -445,7 +393,7 @@ def build_provider_month_df(
     Assemble provider_month_df: merge panel with core, then add ratio,
     code-mix, and code-distribution features.
     """
-    out = panel.merge(core, on=["billing_provider_npi", "month"], how="left")
+    out = _merge_to_panel(panel, core)
 
     # Ratios
     out = compute_ratio_features(out)

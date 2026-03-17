@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import yaml
 from scipy import stats
 
 try:
@@ -14,60 +15,44 @@ try:
 except ImportError:
     RUPTURES_AVAILABLE = False
 
-# ──────────────────────────────────────────────────────────────────────────────
-# CONFIG
-# ──────────────────────────────────────────────────────────────────────────────
-DEFAULT_OUTPUT_CSV = "provider_level.csv"
-MIN_MONTHS_DEFAULT = 12       # threshold for insufficient_history_flag; not a hard exclusion
-DATE_CUTOFF = "2024-12-31"    # only months on or before this date are used
-ROBUST_Z_WINDOW = 6           # prior-N-observed-rows baseline for robust z-score flagging
-ROBUST_Z_THRESHOLD = 2.5      # |robust z| above this → flagged month
-FLAG_RECENT_MONTHS = 6        # last-N-observed-rows window for recent flag count
-MOM_MIN_DENOMINATOR = 10.0    # minimum prior paid_t before computing pct growth
-HIGH_ENTROPY_CHANGE = 0.15    # monthlyized entropy change above this → high code-mix shift
-HIGH_HHI_CHANGE = 0.05        # monthlyized HHI change above this → high concentration shift
-HIGH_CONCENTRATION_HHI = 0.5  # hcpcs_hhi above this → "high concentration" month
-CHANGEPOINT_PENALTY = 10.0    # PELT penalty (higher = fewer breakpoints)
+# ── CONFIG — loaded from config.yaml next to this script ──────────────────────
+_CONFIG_PATH = Path(__file__).parent / "config.yaml"
+
+def _load_config(path: Path = _CONFIG_PATH) -> dict:
+    with open(path) as f:
+        return yaml.safe_load(f)
+
+_cfg = _load_config()
+
+DEFAULT_OUTPUT_CSV     = _cfg["default_output_csv"]
+MIN_MONTHS_DEFAULT     = _cfg["min_months_default"]
+DATE_CUTOFF            = _cfg["date_cutoff"]
+ROBUST_Z_WINDOW        = _cfg["robust_z_window"]
+ROBUST_Z_THRESHOLD     = _cfg["robust_z_threshold"]
+FLAG_RECENT_MONTHS     = _cfg["flag_recent_months"]
+MOM_MIN_DENOMINATOR    = _cfg["mom_min_denominator"]
+HIGH_ENTROPY_CHANGE    = _cfg["high_entropy_change"]
+HIGH_HHI_CHANGE        = _cfg["high_hhi_change"]
+HIGH_CONCENTRATION_HHI = _cfg["high_concentration_hhi"]
+TOP3_HIGH_THRESHOLD    = _cfg["top3_high_threshold"]
+CHANGEPOINT_PENALTY    = _cfg["changepoint_penalty"]
+CHANGEPOINT_MODEL      = _cfg["changepoint_model"]
+CHANGEPOINT_MIN_SIZE   = _cfg["changepoint_min_size"]
+CHANGEPOINT_MIN_OBS    = _cfg["changepoint_min_obs"]
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ──────────────────────────────────────────────────────────────────────────────
+# ── Helpers ────────────────────────────────────────────────────────────────────
 def _gap_months(months: pd.Series) -> np.ndarray:
+    """Calendar-month gaps between consecutive observed months.
+    Uses datetime64[M] arithmetic; exact regardless of day-of-month.
+    Example: [Jan-2023, Apr-2023, May-2023] → [3, 1]
     """
-    Compute the calendar-month gap between each consecutive pair of observed months.
-
-    Uses datetime64[M] arithmetic so the result is exact regardless of
-    day-of-month alignment.
-
-    Args:
-        months: sorted pd.Series of datetime64 values (one per observed month).
-
-    Returns:
-        np.ndarray of length len(months)-1.  Entry i is the number of calendar
-        months between months[i] and months[i+1].  A gap of 1 means truly
-        adjacent calendar months; a gap of 3 means e.g. Jan → Apr.
-
-    Example:
-        [Jan-2023, Apr-2023, May-2023] → [3, 1]
-    """
-    m = months.to_numpy(dtype="datetime64[M]").astype(int)  # months since Unix epoch
+    m = months.to_numpy(dtype="datetime64[M]").astype(int)
     return np.diff(m).astype(float)
 
 
-def _valid_obs_with_gaps(
-    prov: pd.DataFrame,
-    col: str = "paid_t",
-) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Extract non-NaN observations of `col` and the calendar-month gaps between
-    consecutive valid observations (aligned to the same month ordering as prov).
-
-    Returns:
-        values: 1-D array of non-NaN values, sorted by month.
-        gaps:   1-D array of length len(values)-1.  Entry i is the calendar-month
-                distance between valid observation i and i+1.  Empty if len(values) < 2.
-    """
+def _valid_obs_with_gaps(prov: pd.DataFrame, col: str = "paid_t") -> tuple[np.ndarray, np.ndarray]:
+    """Non-NaN values of `col` (sorted by month) and their inter-observation calendar gaps."""
     mask = ~prov[col].isna()
     valid = prov[mask].sort_values("month")
     values = valid[col].to_numpy(dtype=float)
@@ -84,14 +69,9 @@ def _mad(x: np.ndarray) -> float:
 
 
 def _rolling_robust_z(series: pd.Series, window: int) -> pd.Series:
-    """
-    For each observed row t, compute the robust z-score of series[t] against
-    the prior `window` OBSERVED rows (no look-ahead).  Returns NaN until a
-    full window is available.
-
-    NOTE: This is a prior-N-observed-row baseline, NOT a prior-N-calendar-month
-    baseline.  For providers with irregular gaps, these concepts differ
-    substantially.  Features derived from this are documented accordingly.
+    """Robust z-score of each row against the prior `window` OBSERVED rows (no look-ahead).
+    Baseline is prior-N-observed-rows, NOT prior-N-calendar-months.
+    Returns NaN until a full window is available.
     """
     values = series.to_numpy(dtype=float)
     result = np.full(len(values), np.nan)
@@ -106,74 +86,67 @@ def _rolling_robust_z(series: pd.Series, window: int) -> pd.Series:
 
 
 def _linear_slope(x: np.ndarray) -> float:
-    """
-    Slope of OLS regression of x on integer index (units: x-units per observed step,
-    NOT per calendar month — observation spacing is irregular).
-    """
+    """OLS slope per observed step (not per calendar month — spacing is irregular)."""
     x = x[~np.isnan(x)]
     if len(x) < 2:
         return np.nan
-    t = np.arange(len(x), dtype=float)
-    slope, *_ = stats.linregress(t, x)
+    slope, *_ = stats.linregress(np.arange(len(x), dtype=float), x)
     return float(slope)
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Feature groups — each takes one provider's sorted DataFrame, returns a dict
-# ──────────────────────────────────────────────────────────────────────────────
+def _nan_safe_frac(arr: np.ndarray, condition: np.ndarray) -> float:
+    """Fraction of non-NaN entries satisfying `condition`.
+    Excludes NaN positions from both numerator and denominator.
+    """
+    valid = ~np.isnan(arr)
+    if not valid.any():
+        return np.nan
+    return float(np.mean(condition[valid]))
+
+
+# ── Feature groups ─────────────────────────────────────────────────────────────
+def _has_valid(arr: np.ndarray) -> bool:
+    """True if arr has at least one non-NaN value."""
+    return bool(np.any(~np.isnan(arr)))
+
+
 def compute_volume_scale_features(prov: pd.DataFrame) -> dict:
     paid = prov["paid_t"].to_numpy(dtype=float)
+    v = _has_valid(paid)
     return {
         "months_active": int(prov["month"].nunique()),
         "sum_paid":      float(np.nansum(paid)),
-        "mean_paid":     float(np.nanmean(paid))   if len(paid) else np.nan,
-        "median_paid":   float(np.nanmedian(paid)) if len(paid) else np.nan,
-        "max_paid":      float(np.nanmax(paid))    if len(paid) else np.nan,
+        "mean_paid":     float(np.nanmean(paid))   if v else np.nan,
+        "median_paid":   float(np.nanmedian(paid)) if v else np.nan,
+        "max_paid":      float(np.nanmax(paid))    if v else np.nan,
     }
 
 
 def compute_unit_economics_features(prov: pd.DataFrame) -> dict:
-    """
-    Paid-per-claim summaries.
-
-    - mean_paid_per_claim:           unweighted mean of monthly paid_per_claim_t.
-                                     Treats every observed month equally regardless
-                                     of volume.
-    - median_paid_per_claim:         unweighted median.
-    - std_paid_per_claim:            unweighted std.
-    - claim_weighted_paid_per_claim: sum(paid_t) / sum(claims_t) over months where
-                                     claims_t > 0.  More robust than the unweighted
-                                     mean because high-volume months contribute
-                                     proportionally to the rate.
+    """Paid-per-claim summaries.
+    claim_weighted_paid_per_claim = sum(paid_t)/sum(claims_t); more robust than
+    the unweighted mean because high-volume months contribute proportionally.
     """
     ppc = prov["paid_per_claim_t"].to_numpy(dtype=float)
 
     if "claims_t" in prov.columns:
         valid = prov["claims_t"] > 0
-        if valid.any():
-            cwppc = float(prov.loc[valid, "paid_t"].sum() / prov.loc[valid, "claims_t"].sum())
-        else:
-            cwppc = np.nan
+        cwppc = float(prov.loc[valid, "paid_t"].sum() / prov.loc[valid, "claims_t"].sum()) if valid.any() else np.nan
     else:
         cwppc = np.nan
 
     return {
-        "mean_paid_per_claim":            float(np.nanmean(ppc))        if len(ppc) else np.nan,
-        "median_paid_per_claim":          float(np.nanmedian(ppc))      if len(ppc) else np.nan,
-        "std_paid_per_claim":             float(np.nanstd(ppc, ddof=1)) if len(ppc) > 1 else np.nan,
-        "claim_weighted_paid_per_claim":  cwppc,
+        "mean_paid_per_claim":           float(np.nanmean(ppc))        if len(ppc) else np.nan,
+        "median_paid_per_claim":         float(np.nanmedian(ppc))      if len(ppc) else np.nan,
+        "std_paid_per_claim":            float(np.nanstd(ppc, ddof=1)) if len(ppc) > 1 else np.nan,
+        "claim_weighted_paid_per_claim": cwppc,
     }
 
 
 def compute_volatility_features(prov: pd.DataFrame) -> dict:
-    """
-    Volatility of paid_t.
-
-    - cv_paid, mad_paid: level-based metrics; not sensitive to observation gaps.
-    - mean_abs_monthlyized_change_paid: mean |paid_{i+1} - paid_i| / gap_months_i
-        over consecutive non-NaN observations, normalized by calendar distance.
-        A jump across a 3-month gap is divided by 3 so it is comparable to a
-        1-month-gap change.
+    """Volatility of paid_t.
+    mean_abs_monthlyized_change_paid normalizes each consecutive diff by its
+    calendar gap so a jump across 3 months counts the same per month as a 1-month jump.
     """
     paid = prov["paid_t"].to_numpy(dtype=float)
     clean = paid[~np.isnan(paid)]
@@ -184,8 +157,7 @@ def compute_volatility_features(prov: pd.DataFrame) -> dict:
     values, gaps = _valid_obs_with_gaps(prov)
     if len(values) > 1 and len(gaps):
         safe_gaps = np.where(gaps <= 0, 1.0, gaps)
-        adj_abs = np.abs(np.diff(values)) / safe_gaps
-        mean_abs_monthlyized = float(np.mean(adj_abs))
+        mean_abs_monthlyized = float(np.mean(np.abs(np.diff(values)) / safe_gaps))
     else:
         mean_abs_monthlyized = np.nan
 
@@ -197,17 +169,9 @@ def compute_volatility_features(prov: pd.DataFrame) -> dict:
 
 
 def compute_spike_drop_features(prov: pd.DataFrame) -> dict:
-    """
-    Spike, drop, and growth features.
-
-    - spike_ratio_paid: max_paid / median_paid — cross-sectional ratio; not
-        sensitive to observation order or gaps.
-    - max_monthlyized_paid_growth: max monthlyized pct change over consecutive
-        non-NaN observations:
-            ((paid_{i+1} - paid_i) / max(paid_i, MOM_MIN_DENOMINATOR)) / gap_months_i
-    - largest_monthlyized_paid_drop: largest monthlyized absolute drop:
-            max(-adj_diff_i  for  adj_diff_i < 0)
-        where adj_diff_i = (paid_{i+1} - paid_i) / gap_months_i.
+    """Spike, drop, and growth features; all change metrics are gap-aware (monthlyized).
+    max_monthlyized_paid_growth: pct growth rate per month; pairs where prior < MOM_MIN_DENOMINATOR are skipped.
+    largest_monthlyized_paid_drop = max(-adj_diff_i for negative monthlyized diffs)
     """
     paid = prov["paid_t"].to_numpy(dtype=float)
     clean = paid[~np.isnan(paid)]
@@ -220,8 +184,7 @@ def compute_spike_drop_features(prov: pd.DataFrame) -> dict:
         }
 
     median_p = float(np.nanmedian(clean))
-    max_p    = float(np.nanmax(clean))
-    spike_ratio = float(max_p / median_p) if median_p > 0 else np.nan
+    spike_ratio = float(np.nanmax(clean) / median_p) if median_p > 0 else np.nan
 
     values, gaps = _valid_obs_with_gaps(prov)
     if len(values) < 2 or not len(gaps):
@@ -232,19 +195,15 @@ def compute_spike_drop_features(prov: pd.DataFrame) -> dict:
         }
 
     safe_gaps = np.where(gaps <= 0, 1.0, gaps)
-    diffs     = np.diff(values)
-    adj_diffs = diffs / safe_gaps
+    adj_diffs = np.diff(values) / safe_gaps
 
-    # Largest monthlyized absolute drop
     drops = -adj_diffs[adj_diffs < 0]
     largest_monthlyized_drop = float(drops.max()) if len(drops) else 0.0
 
-    # Max monthlyized pct growth — gate denominator to avoid near-zero blow-up
-    prior   = values[:-1]
-    current = values[1:]
-    gate    = prior >= MOM_MIN_DENOMINATOR
+    prior = values[:-1]
+    gate  = prior >= MOM_MIN_DENOMINATOR
     if gate.any():
-        adj_pct = (current[gate] - prior[gate]) / prior[gate] / safe_gaps[gate]
+        adj_pct = (values[1:][gate] - prior[gate]) / prior[gate] / safe_gaps[gate]
         max_growth = float(np.max(adj_pct))
     else:
         max_growth = np.nan
@@ -257,19 +216,10 @@ def compute_spike_drop_features(prov: pd.DataFrame) -> dict:
 
 
 def compute_changepoint_features(prov: pd.DataFrame) -> dict:
-    """
-    Structural break detection via PELT on the ordered observed paid_t sequence.
-
-    IMPORTANT: PELT operates on observed rows in calendar order; calendar gaps
-    between observations are not accounted for.  Changepoints mark breaks in
-    the observed billing pattern, not in a continuous calendar series.
-
-    - changepoint_count_paid:            number of PELT breakpoints.
-    - largest_level_shift_paid:          abs(median(seg_{j+1}) - median(seg_j))
-                                         over adjacent segment pairs.  This is a
-                                         true absolute level shift in dollars.
-    - largest_relative_level_shift_paid: largest_level_shift_paid / max(|median(seg_j)|, 1)
-                                         Relative to the pre-shift segment.
+    """PELT changepoint detection on the ordered observed paid_t sequence.
+    Operates on observed rows only; calendar gaps between rows are not modelled.
+    largest_level_shift_paid = abs(median(seg_{j+1}) - median(seg_j)) in dollars.
+    largest_relative_level_shift_paid = above / max(|pre_median|, 1).
     """
     empty = {
         "changepoint_count_paid":            np.nan,
@@ -281,28 +231,25 @@ def compute_changepoint_features(prov: pd.DataFrame) -> dict:
         return empty
 
     values, _ = _valid_obs_with_gaps(prov)
-    if len(values) < 6:
+    if len(values) < CHANGEPOINT_MIN_OBS:
         return empty
 
     try:
-        signal      = values.reshape(-1, 1)
-        model       = rpt.Pelt(model="rbf", min_size=2, jump=1).fit(signal)
+        model       = rpt.Pelt(model=CHANGEPOINT_MODEL, min_size=CHANGEPOINT_MIN_SIZE, jump=1).fit(values.reshape(-1, 1))
         breakpoints = [b for b in model.predict(pen=CHANGEPOINT_PENALTY) if b < len(values)]
         count       = len(breakpoints)
 
         largest_abs_shift = np.nan
         largest_rel_shift = np.nan
         if breakpoints:
-            segments   = [0] + breakpoints + [len(values)]
-            abs_shifts = []
-            rel_shifts = []
-            for i in range(len(segments) - 2):
-                pre_med  = float(np.median(values[segments[i]:segments[i + 1]]))
-                post_med = float(np.median(values[segments[i + 1]:segments[i + 2]]))
-                abs_shift = abs(post_med - pre_med)
-                rel_shift = abs_shift / max(abs(pre_med), 1.0)
-                abs_shifts.append(abs_shift)
-                rel_shifts.append(rel_shift)
+            segs = [0] + breakpoints + [len(values)]
+            abs_shifts, rel_shifts = [], []
+            for i in range(len(segs) - 2):
+                pre_med  = float(np.median(values[segs[i]:segs[i + 1]]))
+                post_med = float(np.median(values[segs[i + 1]:segs[i + 2]]))
+                a = abs(post_med - pre_med)
+                abs_shifts.append(a)
+                rel_shifts.append(a / max(abs(pre_med), 1.0))
             largest_abs_shift = float(max(abs_shifts))
             largest_rel_shift = float(max(rel_shifts))
     except Exception:
@@ -316,25 +263,14 @@ def compute_changepoint_features(prov: pd.DataFrame) -> dict:
 
 
 def compute_flagged_month_features(prov: pd.DataFrame) -> dict:
-    """
-    Flag anomalous observed months using a rolling robust z-score.
-
-    Baseline: prior ROBUST_Z_WINDOW OBSERVED rows (not calendar months).
-    For irregular data, "prior 6 observed months" and "prior 6 calendar months"
-    are distinct concepts.  All features here are documented as observed-row
-    counts, not calendar-month counts.
-
-    Features:
-    - num_flagged_months:             total observed months with |robust_z| > threshold.
-    - fraction_flagged_months:        num_flagged_months / months_active.
-    - num_flagged_last_6_obs:         flagged count in the last 6 OBSERVED rows.
-    - max_consecutive_flagged_obs:    longest run of consecutively flagged observed rows.
+    """Flag anomalous months via rolling robust z-score.
+    Baseline is prior ROBUST_Z_WINDOW OBSERVED rows, not calendar months.
+    All counts refer to observed-row positions, not calendar continuity.
     """
     paid     = prov["paid_t"].reset_index(drop=True)
     robust_z = _rolling_robust_z(paid, ROBUST_Z_WINDOW)
     flagged  = robust_z.abs() > ROBUST_Z_THRESHOLD
 
-    # Longest consecutive run over observed rows
     max_consec, cur = 0, 0
     for f in flagged:
         if f:
@@ -344,29 +280,31 @@ def compute_flagged_month_features(prov: pd.DataFrame) -> dict:
             cur = 0
 
     n = len(flagged)
-    recent = int(flagged.iloc[-FLAG_RECENT_MONTHS:].sum()) if n >= FLAG_RECENT_MONTHS else int(flagged.sum())
+    # Denominator is only the rows that were actually evaluated (past the warmup window).
+    evaluable = max(n - ROBUST_Z_WINDOW, 0)
+    # num_flagged_last_6_obs is NaN when fewer than FLAG_RECENT_MONTHS rows were evaluated,
+    # so it is not compared against providers with fuller history.
+    recent = int(flagged.iloc[-FLAG_RECENT_MONTHS:].sum()) if evaluable >= FLAG_RECENT_MONTHS else np.nan
 
     return {
         "num_flagged_months":          int(flagged.sum()),
-        "fraction_flagged_months":     float(flagged.mean()) if n else np.nan,
+        "fraction_flagged_months":     float(flagged.sum() / evaluable) if evaluable > 0 else np.nan,
         "num_flagged_last_6_obs":      recent,
         "max_consecutive_flagged_obs": max_consec,
     }
 
 
 def compute_code_mix_summary_features(prov: pd.DataFrame) -> dict:
-    """
-    Code-mix summaries.  Change features for entropy and HHI are gap-aware:
-    raw differences between consecutive observed rows are divided by
-    gap_months so they represent per-calendar-month rates.
+    """Code-mix summaries. Entropy/HHI change features are gap-aware (monthlyized).
+    Fraction features exclude NaN months from both numerator and denominator.
     """
     out: dict = {}
 
     # ── top-code paid share ────────────────────────────────────────────────────
     if "top_code_paid_share" in prov.columns:
         tcps = prov["top_code_paid_share"].to_numpy(dtype=float)
-        out["mean_top_code_paid_share"] = float(np.nanmean(tcps))
-        out["max_top_code_paid_share"]  = float(np.nanmax(tcps)) if len(tcps) else np.nan
+        out["mean_top_code_paid_share"] = float(np.nanmean(tcps)) if _has_valid(tcps) else np.nan
+        out["max_top_code_paid_share"]  = float(np.nanmax(tcps))  if _has_valid(tcps) else np.nan
     else:
         out["mean_top_code_paid_share"] = np.nan
         out["max_top_code_paid_share"]  = np.nan
@@ -374,9 +312,9 @@ def compute_code_mix_summary_features(prov: pd.DataFrame) -> dict:
     # ── top-3 paid share ──────────────────────────────────────────────────────
     if "top_3_code_paid_share" in prov.columns:
         t3 = prov["top_3_code_paid_share"].to_numpy(dtype=float)
-        out["mean_top_3_code_paid_share"]       = float(np.nanmean(t3))
-        out["max_top_3_code_paid_share"]        = float(np.nanmax(t3)) if len(t3) else np.nan
-        out["fraction_months_top3_above_80pct"] = float(np.nanmean(t3 > 0.80)) if len(t3) else np.nan
+        out["mean_top_3_code_paid_share"]       = float(np.nanmean(t3)) if _has_valid(t3) else np.nan
+        out["max_top_3_code_paid_share"]        = float(np.nanmax(t3))  if _has_valid(t3) else np.nan
+        out["fraction_months_top3_above_80pct"] = _nan_safe_frac(t3, t3 > TOP3_HIGH_THRESHOLD)
     else:
         out["mean_top_3_code_paid_share"]       = np.nan
         out["max_top_3_code_paid_share"]        = np.nan
@@ -385,13 +323,12 @@ def compute_code_mix_summary_features(prov: pd.DataFrame) -> dict:
     # ── entropy ────────────────────────────────────────────────────────────────
     if "hcpcs_entropy" in prov.columns:
         ent = prov["hcpcs_entropy"].to_numpy(dtype=float)
-        out["min_hcpcs_entropy"]  = float(np.nanmin(ent))  if len(ent) else np.nan
-        out["mean_hcpcs_entropy"] = float(np.nanmean(ent)) if len(ent) else np.nan
+        out["min_hcpcs_entropy"]  = float(np.nanmin(ent))  if _has_valid(ent) else np.nan
+        out["mean_hcpcs_entropy"] = float(np.nanmean(ent)) if _has_valid(ent) else np.nan
 
         ent_vals, gaps = _valid_obs_with_gaps(prov, col="hcpcs_entropy")
         if len(ent_vals) > 1 and len(gaps):
-            safe_gaps = np.where(gaps <= 0, 1.0, gaps)
-            adj = np.abs(np.diff(ent_vals)) / safe_gaps
+            adj = np.abs(np.diff(ent_vals)) / np.where(gaps <= 0, 1.0, gaps)
             out["max_monthlyized_entropy_change"]  = float(np.max(adj))
             out["mean_monthlyized_entropy_change"] = float(np.mean(adj))
             out["num_months_high_entropy_change"]  = int(np.sum(adj > HIGH_ENTROPY_CHANGE))
@@ -409,14 +346,13 @@ def compute_code_mix_summary_features(prov: pd.DataFrame) -> dict:
     # ── HHI ────────────────────────────────────────────────────────────────────
     if "hcpcs_hhi" in prov.columns:
         hhi = prov["hcpcs_hhi"].to_numpy(dtype=float)
-        out["mean_hcpcs_hhi"]                    = float(np.nanmean(hhi))
-        out["max_hcpcs_hhi"]                     = float(np.nanmax(hhi)) if len(hhi) else np.nan
-        out["fraction_months_high_concentration"] = float(np.nanmean(hhi > HIGH_CONCENTRATION_HHI))
+        out["mean_hcpcs_hhi"]                    = float(np.nanmean(hhi)) if _has_valid(hhi) else np.nan
+        out["max_hcpcs_hhi"]                     = float(np.nanmax(hhi))  if _has_valid(hhi) else np.nan
+        out["fraction_months_high_concentration"] = _nan_safe_frac(hhi, hhi > HIGH_CONCENTRATION_HHI)
 
         hhi_vals, gaps = _valid_obs_with_gaps(prov, col="hcpcs_hhi")
         if len(hhi_vals) > 1 and len(gaps):
-            safe_gaps = np.where(gaps <= 0, 1.0, gaps)
-            adj = np.abs(np.diff(hhi_vals)) / safe_gaps
+            adj = np.abs(np.diff(hhi_vals)) / np.where(gaps <= 0, 1.0, gaps)
             out["max_monthlyized_hhi_change"]  = float(np.max(adj))
             out["mean_monthlyized_hhi_change"] = float(np.mean(adj))
             out["num_months_high_hhi_change"]  = int(np.sum(adj > HIGH_HHI_CHANGE))
@@ -435,10 +371,7 @@ def compute_code_mix_summary_features(prov: pd.DataFrame) -> dict:
 
 
 def compute_code_diversity_features(prov: pd.DataFrame) -> dict:
-    """
-    hcpcs_count_trend is slope per observed step (not per calendar month)
-    because observation spacing is irregular.
-    """
+    """hcpcs_count_trend is slope per observed step (not per calendar month)."""
     if "hcpcs_count_t" not in prov.columns:
         return {k: np.nan for k in (
             "mean_hcpcs_count", "max_hcpcs_count", "std_hcpcs_count",
@@ -451,19 +384,14 @@ def compute_code_diversity_features(prov: pd.DataFrame) -> dict:
         "max_hcpcs_count":             float(np.nanmax(hc))         if len(hc) else np.nan,
         "std_hcpcs_count":             float(np.nanstd(hc, ddof=1)) if len(hc) > 1 else np.nan,
         "hcpcs_count_trend":           _linear_slope(hc),
-        "fraction_months_single_code": float(np.mean(hc == 1.0))   if len(hc) else np.nan,
+        "fraction_months_single_code": _nan_safe_frac(hc, np.round(hc).astype(int) == 1),
     }
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Main collapse
-# ──────────────────────────────────────────────────────────────────────────────
+# ── Main collapse ──────────────────────────────────────────────────────────────
 def build_provider_level(df: pd.DataFrame, min_months: int = MIN_MONTHS_DEFAULT) -> pd.DataFrame:
-    """
-    Collapse provider-month df to one row per provider with all feature groups.
-
-    All providers are kept regardless of months_active.
-    `insufficient_history_flag` = 1 when months_active < min_months.
+    """One row per provider with all feature groups.
+    All providers are kept; insufficient_history_flag=1 when months_active < min_months.
     """
     df = df.copy()
     df["month"] = pd.to_datetime(df["month"], errors="coerce")
@@ -487,9 +415,7 @@ def build_provider_level(df: pd.DataFrame, min_months: int = MIN_MONTHS_DEFAULT)
     return pd.DataFrame(rows).reset_index(drop=True)
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# I/O
-# ──────────────────────────────────────────────────────────────────────────────
+# ── I/O ────────────────────────────────────────────────────────────────────────
 def load_provider_month(path: str) -> pd.DataFrame:
     p = Path(path)
     if not p.is_file():
@@ -509,26 +435,14 @@ def run(
     date_cutoff: str = DATE_CUTOFF,
     filter_output: bool = True,
 ) -> pd.DataFrame:
-    """
-    Load, apply date cutoff, build features for ALL providers, then optionally
-    filter the saved output to providers with months_active >= min_months.
-
-    Args:
-        filter_output: if True (default), drop rows with insufficient_history_flag=1
-                       from the saved CSV.  Features are always built for all
-                       providers before any filtering.
-    """
+    """Build features for ALL providers, then optionally filter output to months_active >= min_months."""
     if not RUPTURES_AVAILABLE:
-        print(
-            "Warning: ruptures not installed — changepoint features will be NaN.\n"
-            "Install with: pip install ruptures",
-            file=sys.stderr,
-        )
+        print("Warning: ruptures not installed — changepoint features will be NaN.\n"
+              "Install with: pip install ruptures", file=sys.stderr)
 
     df = load_provider_month(input_csv)
     df["month"] = pd.to_datetime(df["month"], errors="coerce")
 
-    # ── Date cutoff ───────────────────────────────────────────────────────────
     cutoff = pd.Timestamp(date_cutoff)
     before = len(df)
     df = df[df["month"] <= cutoff]
@@ -536,11 +450,9 @@ def run(
 
     provider_level = build_provider_level(df, min_months=min_months)
 
-    n_insufficient = int(provider_level["insufficient_history_flag"].sum())
-    print(
-        f"Providers built: {len(provider_level):,}  "
-        f"({n_insufficient:,} with months_active < {min_months} → insufficient_history_flag=1)"
-    )
+    n_insuf = int(provider_level["insufficient_history_flag"].sum())
+    print(f"Providers built: {len(provider_level):,}  "
+          f"({n_insuf:,} with months_active < {min_months} → insufficient_history_flag=1)")
 
     if filter_output:
         provider_level = provider_level[provider_level["insufficient_history_flag"] == 0].copy()
@@ -557,42 +469,18 @@ def main():
         description="Build provider-level anomaly detection features from a provider-month CSV."
     )
     parser.add_argument("input_csv", help="Path to provider-month CSV.")
-    parser.add_argument(
-        "--output",
-        default=DEFAULT_OUTPUT_CSV,
-        help=f"Output path for provider-level CSV (default: {DEFAULT_OUTPUT_CSV}).",
-    )
-    parser.add_argument(
-        "--min-months",
-        type=int,
-        default=MIN_MONTHS_DEFAULT,
-        help=(
-            f"Threshold for insufficient_history_flag (default: {MIN_MONTHS_DEFAULT}). "
-            "Features are built for all providers; this only controls the flag value "
-            "and optional output filtering."
-        ),
-    )
-    parser.add_argument(
-        "--date-cutoff",
-        default=DATE_CUTOFF,
-        help=f"Exclude months after this date (default: {DATE_CUTOFF}).",
-    )
-    parser.add_argument(
-        "--no-filter",
-        action="store_true",
-        default=False,
-        help=(
-            "Keep all providers in the output CSV regardless of months_active. "
-            "By default, providers with insufficient_history_flag=1 are dropped."
-        ),
-    )
+    parser.add_argument("--output", default=DEFAULT_OUTPUT_CSV,
+                        help=f"Output CSV path (default: {DEFAULT_OUTPUT_CSV}).")
+    parser.add_argument("--min-months", type=int, default=MIN_MONTHS_DEFAULT,
+                        help=f"Threshold for insufficient_history_flag (default: {MIN_MONTHS_DEFAULT}).")
+    parser.add_argument("--date-cutoff", default=DATE_CUTOFF,
+                        help=f"Exclude months after this date (default: {DATE_CUTOFF}).")
+    parser.add_argument("--no-filter", action="store_true", default=False,
+                        help="Keep all providers in output regardless of months_active.")
     args = parser.parse_args()
 
     provider_level = run(
-        args.input_csv,
-        args.output,
-        args.min_months,
-        args.date_cutoff,
+        args.input_csv, args.output, args.min_months, args.date_cutoff,
         filter_output=not args.no_filter,
     )
 

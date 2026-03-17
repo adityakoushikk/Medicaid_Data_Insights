@@ -91,6 +91,66 @@ scripts/
 └── create_provider_level_from_month.py  # Step 3: provider-month → provider-level features
 ```
 
+---
+
+## Missing Data & Edge Case Handling
+
+### `build_provider_cohorts.py`
+
+All filtering happens in SQL before any data leaves DuckDB.
+
+| Situation | Behaviour |
+|---|---|
+| State field is empty, `NULL`, or `'N/A'` | Row dropped |
+| State is a full name (e.g. `"NEW MEXICO"`) | Normalized to 2-letter code via `STATE_NORMALIZE` lookup |
+| State is unrecognized or `ZZ` (foreign) | Normalizes to `NULL` → row dropped |
+| Entity type not `'1'` or `'2'` | Row dropped |
+| No taxonomy slot has Primary Switch = `'Y'` | Falls back to first non-null taxonomy code across slots 1–15 |
+| All 15 taxonomy slots are null | Assigned `'UNKNOWN'` → row dropped |
+| NPI in Medicaid but not in NPPES | Dropped (INNER JOIN) |
+| NPI in NPPES but not in Medicaid | Dropped (INNER JOIN) |
+
+---
+
+### `create_provider_month_dataset.py`
+
+Filtering happens in pandas after loading. Invalid values are coerced to `NaN` rather than dropping rows, so partial data is preserved.
+
+| Situation | Behaviour |
+|---|---|
+| `CLAIM_FROM_MONTH` cannot be parsed as a date | Coerced to `NaT` → row dropped |
+| `BILLING_PROVIDER_NPI_NUM` is null or empty string | Row dropped |
+| `TOTAL_PAID` or `TOTAL_CLAIMS` is non-numeric | Coerced to `NaN`; row kept, `NaN` propagates into aggregates |
+| `TOTAL_UNIQUE_BENEFICIARIES` column missing entirely | `beneficiaries_proxy_t` set to `NaN` for all rows |
+| `claims_t = 0` in a month | `paid_per_claim_t = NaN` |
+| `beneficiaries_proxy_t = 0` in a month | Both beneficiary ratio features = `NaN` |
+| `paid_total = 0` for a (provider, month) in code-mix | `top_code_paid_share`, `top_3_code_paid_share`, `hcpcs_entropy`, `hcpcs_hhi` = `NaN`; `top_hcpcs_code_t = ""` |
+| Only 1 code billed in a month | Distribution features with `ddof=1` (std) = `NaN`; others compute normally |
+| `--cohorts` passed without `--cohort-csv` | `--cohorts` is silently ignored; all providers are kept |
+
+---
+
+### `create_provider_level_from_month.py`
+
+All features are built for every provider before any filtering. `NaN` is returned rather than raising exceptions for edge cases.
+
+| Situation | Behaviour |
+|---|---|
+| Months after `DATE_CUTOFF` | Dropped before feature computation |
+| Provider has fewer than `--min-months` observed months | Features still computed; `insufficient_history_flag = 1`; dropped from output by default (use `--no-filter` to keep) |
+| Only 1 observed month | All diff/change/volatility features = `NaN` (require ≥ 2 observations) |
+| All `paid_t` values are `NaN` | Volume features = `NaN`; `sum_paid = 0.0` (via `nansum`) |
+| Calendar gap between consecutive months ≤ 0 | Gap clamped to 1.0 to prevent division by zero in monthlyized rates |
+| Prior `paid_t < MOM_MIN_DENOMINATOR` (default $10) | MoM growth rate = `NaN` to avoid near-zero denominator blow-up |
+| `median_paid = 0` | `spike_ratio_paid = NaN` |
+| `cv_paid` when mean = 0 or std is `NaN` | `cv_paid = NaN` |
+| Rolling robust z-score: fewer than `ROBUST_Z_WINDOW` (6) prior rows | `NaN` until window fills; flagged-month features count only where z-score is non-NaN |
+| Rolling robust z-score: MAD of baseline window = 0 (constant signal) | Z-score skipped for that row → `NaN` |
+| `ruptures` not installed | All changepoint features = `NaN`; warning printed to stderr |
+| Fewer than 6 valid `paid_t` observations | Changepoint features = `NaN` (PELT minimum) |
+| PELT raises an exception | Changepoint features = `NaN` (caught silently) |
+| Optional columns absent from input (e.g. `hcpcs_entropy`, `top_code_paid_share`) | Corresponding features = `NaN`; script does not error |
+
 ## Run Scripts
 
 ```
