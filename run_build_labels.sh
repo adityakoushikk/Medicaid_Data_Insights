@@ -4,7 +4,7 @@
 set -e
 
 REPO="$(cd "$(dirname "$0")" && pwd)"
-LEIE_CSV="$REPO/data/datasets/LEIE.csv"
+LEIE_CSV="$REPO/data/datasets/LEIElabels.csv"
 MEDICAID_CSV="$REPO/data/datasets/medicaid-provider-spending.csv"
 OUTPUT_CSV="$REPO/data/outputs/provider_labels.csv"
 

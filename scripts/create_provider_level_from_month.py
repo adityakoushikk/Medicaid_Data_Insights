@@ -455,6 +455,7 @@ def run(
     output_csv: str = DEFAULT_OUTPUT_CSV,
     dictionary_csv: str = DEFAULT_DICTIONARY_CSV,
     dictionary_json: Path = _DICT_SOURCE,
+    labels_csv: str | None = None,
     min_months: int = MIN_MONTHS_DEFAULT,
     date_cutoff: str = DATE_CUTOFF,
     filter_output: bool = True,
@@ -483,6 +484,19 @@ def run(
     if filter_output:
         provider_level = provider_level[provider_level["insufficient_history_flag"] == 0].copy()
         print(f"After output filter: {len(provider_level):,} providers retained.")
+
+    # Append label column from LEIE labels file (NaN if not provided)
+    if labels_csv is not None:
+        labels = pd.read_csv(labels_csv, dtype={"npi": str})[["npi", "label"]]
+        provider_level["billing_provider_npi"] = provider_level["billing_provider_npi"].astype(str)
+        provider_level = provider_level.merge(
+            labels, left_on="billing_provider_npi", right_on="npi", how="left"
+        ).drop(columns="npi")
+        n_labeled = int(provider_level["label"].notna().sum())
+        n_positive = int((provider_level["label"] == 1).sum())
+        print(f"Labels joined: {n_labeled:,} providers matched, {n_positive:,} positive (label=1).")
+    else:
+        provider_level["label"] = float("nan")
 
     # Save CSV
     out_path = Path(output_csv)
@@ -517,13 +531,15 @@ def main():
                         help=f"Threshold for insufficient_history_flag (default: {MIN_MONTHS_DEFAULT}).")
     parser.add_argument("--date-cutoff", default=DATE_CUTOFF,
                         help=f"Exclude months after this date (default: {DATE_CUTOFF}).")
+    parser.add_argument("--labels-csv", default=None,
+                        help="Path to provider_labels.csv from build_labels.py. If provided, joins label column.")
     parser.add_argument("--no-filter", action="store_true", default=False,
                         help="Keep all providers in output regardless of months_active.")
     args = parser.parse_args()
 
     provider_level = run(
         args.input_csv, args.output, args.dictionary_csv, args.dictionary_json,
-        args.min_months, args.date_cutoff,
+        args.labels_csv, args.min_months, args.date_cutoff,
         filter_output=not args.no_filter,
     )
 

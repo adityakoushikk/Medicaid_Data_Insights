@@ -10,22 +10,7 @@ import duckdb
 import numpy as np
 import pandas as pd
 
-# -----------------------------------------------------------------------------
-# ASSUMPTIONS (edit as needed)
-# -----------------------------------------------------------------------------
-# 1. Raw data: one row per (billing_provider_npi, month, hcpcs_code) or similar,
-#    with paid_amount, claims_count, beneficiary_count (or equivalents).
-# 2. We do NOT use NPPES or any external provider file.
-# 3. We report data as-is: only (provider, month) pairs that have at least one
-#    billing row. We do not create rows for missing months (cannot distinguish
-#    "didn't report" from "data missing"). Default: BUILD_BALANCED_PANEL = False.
 
-# -----------------------------------------------------------------------------
-# CONFIG: Column mapping (raw -> standard names)
-# -----------------------------------------------------------------------------
-# Map your CSV column names to the names used in this script.
-# Standard names: billing_provider_npi, month, hcpcs_code, paid_amount,
-#                 claims_count, beneficiary_count
 COLUMN_MAP = {
     "BILLING_PROVIDER_NPI_NUM": "billing_provider_npi",
     "CLAIM_FROM_MONTH": "month",

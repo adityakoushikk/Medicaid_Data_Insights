@@ -493,5 +493,16 @@
     "data_type": "int",
     "missing_value_logic": "Not missing.",
     "notes": "Providers with flag=1 are dropped from output by default. Use --no-filter to keep them."
+  },
+  {
+    "column_name": "label",
+    "feature_group": "support",
+    "definition": "1 if provider NPI appears in the LEIE exclusion dataset; 0 otherwise.",
+    "formula_or_logic": "Left join on billing_provider_npi to provider_labels.csv; 1 if matched, 0 if not.",
+    "source_columns": "billing_provider_npi",
+    "grain": "provider",
+    "data_type": "float",
+    "missing_value_logic": "NaN if --labels-csv not provided.",
+    "notes": "Sourced from build_labels.py output. NaN when run without --labels-csv."
   }
 ]
