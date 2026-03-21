@@ -209,15 +209,30 @@ def compute_core_monthly_aggregates(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def compute_code_level_totals(df: pd.DataFrame) -> pd.DataFrame:
-    """One row per (billing_provider_npi, month, hcpcs_code) with code-level paid and claims."""
+    """One row per (billing_provider_npi, month, hcpcs_code) with code-level paid, claims,
+    and beneficiary count (code_bene).
+
+    NOTE: code_bene is a PROXY — it sums TOTAL_UNIQUE_BENEFICIARIES at the
+    provider × HCPCS × month grain, which can double-count beneficiaries who
+    appear under multiple HCPCS codes.  If beneficiary_count is absent from
+    df, code_bene will not be present in the output.
+    """
+    agg_dict: dict = {
+        "paid_amount": ("paid_amount", "sum"),
+        "claims_count": ("claims_count", "sum"),
+    }
+    if "beneficiary_count" in df.columns:
+        agg_dict["beneficiary_count"] = ("beneficiary_count", "sum")
+
     code_agg = (
         df.groupby(["billing_provider_npi", "month", "hcpcs_code"], dropna=False)
-        .agg(paid_amount=("paid_amount", "sum"), claims_count=("claims_count", "sum"))
+        .agg(**agg_dict)
         .reset_index()
     )
-    code_agg = code_agg.rename(
-        columns={"paid_amount": "code_paid", "claims_count": "code_claims"}
-    )
+    rename_map = {"paid_amount": "code_paid", "claims_count": "code_claims"}
+    if "beneficiary_count" in code_agg.columns:
+        rename_map["beneficiary_count"] = "code_bene"
+    code_agg = code_agg.rename(columns=rename_map)
     return code_agg
 
 
@@ -311,7 +326,8 @@ def compute_beneficiary_proxy_features(
 def compute_code_mix_features(
     code_level: pd.DataFrame, provider_month_df: pd.DataFrame
 ) -> pd.DataFrame:
-    """Add top_code_paid_share, top_3_code_paid_share, hcpcs_entropy, hcpcs_hhi."""
+    """Add paid-based code-mix features: top_code_paid_share, top_3_code_paid_share,
+    hcpcs_entropy, hcpcs_hhi."""
     grp_keys = ["billing_provider_npi", "month"]
     g = code_level.groupby(grp_keys)
 
@@ -340,6 +356,119 @@ def compute_code_mix_features(
     return _merge_to_panel(provider_month_df, mix_df)
 
 
+def compute_claim_code_mix_features(
+    code_level: pd.DataFrame, provider_month_df: pd.DataFrame
+) -> pd.DataFrame:
+    """Add claim-based code-mix features: top_code_claim_share_t, top_3_code_claim_share_t,
+    hcpcs_claim_entropy_t, hcpcs_claim_hhi_t.
+
+    Shares are computed using TOTAL_CLAIMS (code_claims) within each provider-month.
+    """
+    grp_keys = ["billing_provider_npi", "month"]
+    g = code_level.groupby(grp_keys)
+
+    claim_total = g["code_claims"].sum()
+    top_code_claim_share = (g["code_claims"].max() / claim_total).where(claim_total > 0)
+
+    def _top3_sum(x):
+        n = min(3, len(x))
+        return float(np.partition(x.values, -n)[-n:].sum())
+
+    top_3_code_claim_share = (g["code_claims"].apply(_top3_sum) / claim_total).where(claim_total > 0)
+
+    claim_tot_t = code_level.groupby(grp_keys)["code_claims"].transform("sum")
+    p_claim = code_level["code_claims"].div(claim_tot_t.replace(0, np.nan)).fillna(0.0)
+    cl = code_level.assign(_p_claim=p_claim)
+    hcpcs_claim_entropy = cl.groupby(grp_keys)["_p_claim"].apply(_entropy)
+    hcpcs_claim_hhi = cl.groupby(grp_keys)["_p_claim"].apply(_hhi)
+
+    mix_df = pd.DataFrame({
+        "top_code_claim_share_t": top_code_claim_share,
+        "top_3_code_claim_share_t": top_3_code_claim_share,
+        "hcpcs_claim_entropy_t": hcpcs_claim_entropy,
+        "hcpcs_claim_hhi_t": hcpcs_claim_hhi,
+    }).reset_index()
+
+    return _merge_to_panel(provider_month_df, mix_df)
+
+
+def compute_beneficiary_code_mix_features(
+    code_level: pd.DataFrame, provider_month_df: pd.DataFrame
+) -> pd.DataFrame:
+    """Add beneficiary-proxy code-mix features: top_code_beneficiary_share_t,
+    top_3_code_beneficiary_share_t, hcpcs_beneficiary_entropy_t, hcpcs_beneficiary_hhi_t.
+
+    IMPORTANT — PROXY FEATURES: shares are computed from code_bene, which is the
+    sum of TOTAL_UNIQUE_BENEFICIARIES at the provider × HCPCS × month grain.
+    Summing across HCPCS codes can double-count a beneficiary who appears under
+    multiple codes.  All output columns carry the ``_beneficiary_`` infix to make
+    this explicit.  If beneficiary_count is absent from the raw data, all four
+    columns are NaN and a warning is printed.
+    """
+    BENE_COL = "code_bene"
+    grp_keys = ["billing_provider_npi", "month"]
+    _NEW_COLS = (
+        "top_code_beneficiary_share_t",
+        "top_3_code_beneficiary_share_t",
+        "hcpcs_beneficiary_entropy_t",
+        "hcpcs_beneficiary_hhi_t",
+    )
+
+    if BENE_COL not in code_level.columns:
+        print(
+            f"Warning: source column '{BENE_COL}' not found in code-level data — "
+            "beneficiary code-mix features will be NaN.",
+            file=sys.stderr,
+        )
+        out = provider_month_df.copy()
+        for col in _NEW_COLS:
+            out[col] = np.nan
+        return out
+
+    g = code_level.groupby(grp_keys)
+    bene_total = g[BENE_COL].sum()
+    top_code_bene_share = (g[BENE_COL].max() / bene_total).where(bene_total > 0)
+
+    def _top3_sum(x):
+        n = min(3, len(x))
+        return float(np.partition(x.values, -n)[-n:].sum())
+
+    top_3_code_bene_share = (g[BENE_COL].apply(_top3_sum) / bene_total).where(bene_total > 0)
+
+    bene_tot_t = code_level.groupby(grp_keys)[BENE_COL].transform("sum")
+    p_bene = code_level[BENE_COL].div(bene_tot_t.replace(0, np.nan)).fillna(0.0)
+    cl = code_level.assign(_p_bene=p_bene)
+    hcpcs_bene_entropy = cl.groupby(grp_keys)["_p_bene"].apply(_entropy)
+    hcpcs_bene_hhi = cl.groupby(grp_keys)["_p_bene"].apply(_hhi)
+
+    mix_df = pd.DataFrame({
+        "top_code_beneficiary_share_t": top_code_bene_share,
+        "top_3_code_beneficiary_share_t": top_3_code_bene_share,
+        "hcpcs_beneficiary_entropy_t": hcpcs_bene_entropy,
+        "hcpcs_beneficiary_hhi_t": hcpcs_bene_hhi,
+    }).reset_index()
+
+    return _merge_to_panel(provider_month_df, mix_df)
+
+
+def compute_mismatch_features(provider_month_df: pd.DataFrame) -> pd.DataFrame:
+    """Add paid-vs-claim and paid-vs-beneficiary mismatch features.
+
+    Requires top_code_paid_share, top_code_claim_share_t, top_code_beneficiary_share_t,
+    hcpcs_hhi, and hcpcs_claim_hhi_t to already be present.  Results inherit NaN
+    from any missing upstream column.
+    """
+    out = provider_month_df.copy()
+    out["top_code_paid_minus_claim_share_t"] = (
+        out["top_code_paid_share"] - out["top_code_claim_share_t"]
+    )
+    out["top_code_paid_minus_beneficiary_share_t"] = (
+        out["top_code_paid_share"] - out["top_code_beneficiary_share_t"]
+    )
+    out["hcpcs_paid_hhi_minus_claim_hhi_t"] = out["hcpcs_hhi"] - out["hcpcs_claim_hhi_t"]
+    return out
+
+
 def build_provider_month_df(
     raw_df: pd.DataFrame,
     panel: pd.DataFrame,
@@ -352,8 +481,11 @@ def build_provider_month_df(
     """
     out = _merge_to_panel(panel, core)
     out = compute_ratio_features(out)
-    out = compute_code_mix_features(code_level, out)
-    out = compute_beneficiary_proxy_features(raw_df, out)
+    out = compute_code_mix_features(code_level, out)            # paid-based (existing)
+    out = compute_claim_code_mix_features(code_level, out)      # claim-based (new)
+    out = compute_beneficiary_code_mix_features(code_level, out)  # bene-proxy code-mix (new)
+    out = compute_beneficiary_proxy_features(raw_df, out)       # bene-proxy totals (existing)
+    out = compute_mismatch_features(out)                        # paid-vs-claim/bene diffs (new)
 
     # Sort for reproducibility
     out = out.sort_values(["billing_provider_npi", "month"]).reset_index(drop=True)

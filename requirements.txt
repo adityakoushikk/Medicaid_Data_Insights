@@ -10,3 +10,4 @@ ruptures
 pyyaml
 keras
 tensorflow
+tsfresh
