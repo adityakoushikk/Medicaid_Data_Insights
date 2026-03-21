@@ -11,7 +11,7 @@ from pathlib import Path
 import duckdb
 
 
-LEIE_REQUIRED_COLUMNS = {"NPI"}
+LEIE_REQUIRED_COLUMNS = {"NPI", "EXCLDATE"}
 MEDICAID_REQUIRED_COLUMNS = {"BILLING_PROVIDER_NPI_NUM"}
 
 
@@ -58,15 +58,17 @@ def run(leie_csv: str, medicaid_csv: str, output_csv: str) -> None:
             FROM read_csv_auto('{medicaid_csv}')
         ),
         leie_npis AS (
-            SELECT DISTINCT CAST(NPI AS VARCHAR) AS npi
+            SELECT CAST(NPI AS VARCHAR) AS npi, MIN(CAST(EXCLDATE AS VARCHAR)) AS excldate
             FROM read_csv_auto('{leie_csv}')
             WHERE NPI IS NOT NULL
               AND TRIM(CAST(NPI AS VARCHAR)) <> ''
-              AND TRIM(CAST(NPI AS VARCHAR)) <> '0'
+              AND CAST(NPI AS BIGINT) <> 0
+            GROUP BY NPI
         )
         SELECT
             m.npi,
-            CASE WHEN l.npi IS NOT NULL THEN 1 ELSE 0 END AS label
+            CASE WHEN l.npi IS NOT NULL THEN 1 ELSE 0 END AS label,
+            l.excldate
         FROM medicaid_npis m
         LEFT JOIN leie_npis l
             ON m.npi = l.npi

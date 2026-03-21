@@ -95,7 +95,8 @@ def filter_raw_to_cohort(
     raw_path_safe = str(raw_path.resolve()).replace("'", "''")
     out_path_safe = str(Path(output_path).resolve()).replace("'", "''")
 
-    cohort_npi_safe = '"npi"'
+    # Cohort CSV uses billing_provider_npi (same as raw). No "npi" column.
+    cohort_npi_safe = '"billing_provider_npi"'
 
     con.execute(
         f"CREATE TEMP VIEW cohort_filter_npis AS SELECT * FROM read_csv_auto('{cohort_path_safe}')"
@@ -194,17 +195,28 @@ def build_provider_month_panel(df: pd.DataFrame, build_balanced: bool) -> pd.Dat
 
 
 def compute_core_monthly_aggregates(df: pd.DataFrame) -> pd.DataFrame:
-    """One row per (billing_provider_npi, month) with paid_t, claims_t, hcpcs_count_t."""
-    core = df.groupby(["billing_provider_npi", "month"], dropna=False).agg(
-        paid_amount=("paid_amount", "sum"),
-        claims_count=("claims_count", "sum"),
-        hcpcs_code=("hcpcs_code", "nunique"),
+    """
+    One row per (billing_provider_npi, month) with:
+    paid_t, claims_t, beneficiaries_proxy_t, hcpcs_count_t.
+    """
+    agg = {
+        "paid_amount": "sum",
+        "claims_count": "sum",
+        "hcpcs_code": "nunique",
+    }
+    if "beneficiary_count" in df.columns:
+        agg["beneficiary_count"] = "sum"
+    core = df.groupby(["billing_provider_npi", "month"], dropna=False).agg(agg)
+    core = core.rename(
+        columns={
+            "paid_amount": "paid_t",
+            "claims_count": "claims_t",
+            "beneficiary_count": "beneficiaries_proxy_t",
+            "hcpcs_code": "hcpcs_count_t",
+        }
     )
-    core = core.rename(columns={
-        "paid_amount": "paid_t",
-        "claims_count": "claims_t",
-        "hcpcs_code": "hcpcs_count_t",
-    })
+    if "beneficiaries_proxy_t" not in core.columns:
+        core["beneficiaries_proxy_t"] = np.nan
     return core.reset_index()
 
 
@@ -222,10 +234,20 @@ def compute_code_level_totals(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def compute_ratio_features(provider_month_df: pd.DataFrame) -> pd.DataFrame:
-    """Add paid_per_claim_t."""
+    """Add paid_per_claim_t, claims_per_beneficiaries_proxy_t, paid_per_beneficiaries_proxy_t."""
     out = provider_month_df.copy()
     out["paid_per_claim_t"] = np.where(
         out["claims_t"] != 0, out["paid_t"] / out["claims_t"], np.nan
+    )
+    out["claims_per_beneficiaries_proxy_t"] = np.where(
+        out["beneficiaries_proxy_t"] != 0,
+        out["claims_t"] / out["beneficiaries_proxy_t"],
+        np.nan,
+    )
+    out["paid_per_beneficiaries_proxy_t"] = np.where(
+        out["beneficiaries_proxy_t"] != 0,
+        out["paid_t"] / out["beneficiaries_proxy_t"],
+        np.nan,
     )
     return out
 
@@ -250,21 +272,60 @@ def _hhi(probs: np.ndarray) -> float:
     return float(np.sum(p ** 2))
 
 
+def _compute_col_stats(g, code_level: pd.DataFrame, col: str, prefix: str) -> pd.DataFrame:
+    """Compute distribution stats for one code-level column; returns a MultiIndexed DataFrame."""
+    def q1(x): return x.quantile(0.25)
+    def q3(x): return x.quantile(0.75)
+
+    stats = g[col].agg([
+        ("mean", "mean"), ("median", "median"), ("max", "max"), ("min", "min"),
+        ("std", "std"), ("iqr", lambda x: q3(x) - q1(x)),
+        ("mad", lambda x: (x - x.median()).abs().median()),
+        ("skew", "skew"), ("kurt", "kurt"),
+    ]).rename(columns=lambda c: (
+        f"{c}_{prefix}_single_code" if c in ("max", "min") else f"{c}_{prefix}_per_code"
+    ))
+    stats[f"{prefix}_code_range"] = (
+        stats[f"max_{prefix}_single_code"] - stats[f"min_{prefix}_single_code"]
+    )
+    stats[f"{prefix}_code_energy"] = g[col].apply(lambda x: (x ** 2).sum())
+    above_mean = (
+        code_level.assign(
+            _mean=code_level.groupby(["billing_provider_npi", "month"])[col].transform("mean")
+        )
+        .query(f"{col} > _mean")
+        .groupby(["billing_provider_npi", "month"])
+        .size()
+        .reindex(stats.index)
+        .fillna(0)
+        .astype(int)
+    )
+    stats[f"num_codes_above_mean_{prefix}"] = above_mean
+    return stats
+
+
 def compute_code_mix_features(
     code_level: pd.DataFrame, provider_month_df: pd.DataFrame
 ) -> pd.DataFrame:
-    """Add top_code_paid_share, top_3_code_paid_share, hcpcs_entropy, hcpcs_hhi."""
+    """
+    Add top_code_paid_share, top_code_claim_share, top_3 variants, hcpcs_entropy,
+    hcpcs_hhi, top_hcpcs_code_t. Merge back to provider_month_df.
+    """
     grp_keys = ["billing_provider_npi", "month"]
     g = code_level.groupby(grp_keys)
 
     paid_total = g["code_paid"].sum()
+    claims_total = g["code_claims"].sum()
+
     top_code_paid_share = (g["code_paid"].max() / paid_total).where(paid_total > 0)
+    top_code_claim_share = (g["code_claims"].max() / claims_total).where(claims_total > 0)
 
     def _top3_sum(x):
         n = min(3, len(x))
         return float(np.partition(x.values, -n)[-n:].sum())
 
     top_3_code_paid_share = (g["code_paid"].apply(_top3_sum) / paid_total).where(paid_total > 0)
+    top_3_code_claim_share = (g["code_claims"].apply(_top3_sum) / claims_total).where(claims_total > 0)
 
     paid_tot_t = code_level.groupby(grp_keys)["code_paid"].transform("sum")
     p_paid = code_level["code_paid"].div(paid_tot_t.replace(0, np.nan)).fillna(0.0)
@@ -272,14 +333,39 @@ def compute_code_mix_features(
     hcpcs_entropy = cl.groupby(grp_keys)["_p_paid"].apply(_entropy)
     hcpcs_hhi = cl.groupby(grp_keys)["_p_paid"].apply(_hhi)
 
+    top_idx = g["code_paid"].idxmax()
+    top_hcpcs = (
+        code_level.loc[top_idx.values, "hcpcs_code"]
+        .astype(str)
+        .set_axis(top_idx.index)
+        .where(paid_total > 0, "")
+    )
+
     mix_df = pd.DataFrame({
         "top_code_paid_share": top_code_paid_share,
+        "top_code_claim_share": top_code_claim_share,
         "top_3_code_paid_share": top_3_code_paid_share,
+        "top_3_code_claim_share": top_3_code_claim_share,
         "hcpcs_entropy": hcpcs_entropy,
         "hcpcs_hhi": hcpcs_hhi,
+        "top_hcpcs_code_t": top_hcpcs,
     }).reset_index()
 
     return _merge_to_panel(provider_month_df, mix_df)
+
+
+def compute_code_distribution_features(
+    code_level: pd.DataFrame, provider_month_df: pd.DataFrame
+) -> pd.DataFrame:
+    """
+    Add within-month code-level stats: mean/median/std/min/max/range/iqr/mad/skew/kurt
+    for paid and claims, plus num_codes_above_mean_*, paid_code_energy, claims_code_energy.
+    """
+    g = code_level.groupby(["billing_provider_npi", "month"])
+    paid_stats = _compute_col_stats(g, code_level, "code_paid", "paid")
+    claims_stats = _compute_col_stats(g, code_level, "code_claims", "claims")
+    dist_df = paid_stats.join(claims_stats).reset_index()
+    return _merge_to_panel(provider_month_df, dist_df)
 
 
 def build_provider_month_df(
@@ -293,8 +379,13 @@ def build_provider_month_df(
     code-mix, and code-distribution features.
     """
     out = _merge_to_panel(panel, core)
+
+    # Ratios
     out = compute_ratio_features(out)
+    # Code-mix
     out = compute_code_mix_features(code_level, out)
+    # Code distribution
+    out = compute_code_distribution_features(code_level, out)
 
     # Sort for reproducibility
     out = out.sort_values(["billing_provider_npi", "month"]).reset_index(drop=True)
@@ -384,7 +475,6 @@ def run(
     dictionary_json: str = DEFAULT_DATA_DICTIONARY_JSON,
     cohort_csv: str | None = None,
     cohorts: list[str] | None = None,
-    labels_csv: str | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Load, clean, build panel, compute features, build dictionary from JSON, save. Returns (provider_month_df, data_dictionary)."""
     data_path = input_csv
@@ -405,31 +495,6 @@ def run(
     core = compute_core_monthly_aggregates(df)
     code_level = compute_code_level_totals(df)
     provider_month_df = build_provider_month_df(df, panel, core, code_level)
-
-    # Join label and excldate from LEIE labels file (one row per NPI)
-    if labels_csv is not None:
-        labels = pd.read_csv(labels_csv, dtype={"npi": str})
-        provider_month_df["billing_provider_npi"] = provider_month_df["billing_provider_npi"].astype(str)
-        provider_month_df = provider_month_df.merge(
-            labels.rename(columns={"npi": "billing_provider_npi"}),
-            on="billing_provider_npi", how="left"
-        )
-        n_positive = int((provider_month_df["label"] == 1).sum())
-        print(f"Labels joined: {n_positive:,} provider-month rows with label=1.")
-
-        # Drop months after exclusion date for LEIE providers
-        has_excldate = provider_month_df["excldate"].notna()
-        excl_dt = pd.to_datetime(provider_month_df.loc[has_excldate, "excldate"], format="%Y%m%d", errors="coerce")
-        month_dt = pd.to_datetime(provider_month_df.loc[has_excldate, "month"])
-        drop_mask = has_excldate.copy()
-        drop_mask[has_excldate] = month_dt > excl_dt
-        before = len(provider_month_df)
-        provider_month_df = provider_month_df[~drop_mask].reset_index(drop=True)
-        print(f"Dropped {before - len(provider_month_df):,} provider-month rows after exclusion date.")
-    else:
-        provider_month_df["label"] = float("nan")
-        provider_month_df["excldate"] = float("nan")
-
     provider_month_data_dictionary = build_data_dictionary(
         provider_month_df, dictionary_json
     )
@@ -468,11 +533,6 @@ def main():
         metavar="COHORT",
         help="Restrict to these cohorts. Each value is either a cohort ID (number, e.g. 1) or a cohort_label (e.g. NM_organization). Examples: --cohorts 1  or  --cohorts NM_organization  or  --cohorts 1 2 CA_individual. Only used when --cohort-csv is set; if omitted, all providers in the cohort file are kept.",
     )
-    parser.add_argument(
-        "--labels-csv",
-        default=None,
-        help="Path to provider_labels.csv from build_labels.py. If provided, joins label and excldate onto every provider-month row.",
-    )
     args = parser.parse_args()
     provider_month_df, provider_month_data_dictionary = run(
         args.input_csv,
@@ -481,7 +541,6 @@ def main():
         args.dictionary_json,
         cohort_csv=args.cohort_csv,
         cohorts=args.cohorts if args.cohorts else None,
-        labels_csv=args.labels_csv,
     )
     print("provider_month_df shape:", provider_month_df.shape)
     print("provider_month_df columns:", list(provider_month_df.columns))

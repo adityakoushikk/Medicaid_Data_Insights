@@ -241,8 +241,8 @@ def compute_changepoint_features(prov: pd.DataFrame) -> dict:
         breakpoints = [b for b in model.predict(pen=CHANGEPOINT_PENALTY) if b < len(values)]
         count       = len(breakpoints)
 
-        largest_abs_shift = np.nan
-        largest_rel_shift = np.nan
+        largest_abs_shift = 0.0
+        largest_rel_shift = 0.0
         if breakpoints:
             segs = [0] + breakpoints + [len(values)]
             abs_shifts, rel_shifts = [], []
@@ -455,7 +455,6 @@ def run(
     output_csv: str = DEFAULT_OUTPUT_CSV,
     dictionary_csv: str = DEFAULT_DICTIONARY_CSV,
     dictionary_json: Path = _DICT_SOURCE,
-    labels_csv: str | None = None,
     min_months: int = MIN_MONTHS_DEFAULT,
     date_cutoff: str = DATE_CUTOFF,
     filter_output: bool = True,
@@ -485,16 +484,26 @@ def run(
         provider_level = provider_level[provider_level["insufficient_history_flag"] == 0].copy()
         print(f"After output filter: {len(provider_level):,} providers retained.")
 
-    # Append label column from LEIE labels file (NaN if not provided)
-    if labels_csv is not None:
-        labels = pd.read_csv(labels_csv, dtype={"npi": str})[["npi", "label"]]
-        provider_level["billing_provider_npi"] = provider_level["billing_provider_npi"].astype(str)
-        provider_level = provider_level.merge(
-            labels, left_on="billing_provider_npi", right_on="npi", how="left"
-        ).drop(columns="npi")
-        n_labeled = int(provider_level["label"].notna().sum())
+    # Drop providers where median paid == 0 (spike_ratio_paid NaN) — not useful for paid-based detection
+    before = len(provider_level)
+    provider_level = provider_level[provider_level["spike_ratio_paid"].notna()].copy()
+    print(f"Dropped {before - len(provider_level):,} providers with median paid = 0.")
+
+    # Impute changepoint shift columns with 0 (no changepoint detected = no shift)
+    provider_level["largest_level_shift_paid"] = provider_level["largest_level_shift_paid"].fillna(0)
+    provider_level["largest_relative_level_shift_paid"] = provider_level["largest_relative_level_shift_paid"].fillna(0)
+
+    # Impute variation features with 0 where NaN (all-identical values → no variation)
+    for col in ["cv_paid", "std_paid_per_claim", "max_monthlyized_paid_growth"]:
+        if col in provider_level.columns:
+            provider_level[col] = provider_level[col].fillna(0)
+
+    # Condense label from provider-month (all months share the same label per provider)
+    if "label" in df.columns:
+        npi_label = df.groupby("billing_provider_npi")["label"].max().reset_index()
+        provider_level = provider_level.merge(npi_label, on="billing_provider_npi", how="left")
         n_positive = int((provider_level["label"] == 1).sum())
-        print(f"Labels joined: {n_labeled:,} providers matched, {n_positive:,} positive (label=1).")
+        print(f"Labels condensed: {n_positive:,} providers with label=1.")
     else:
         provider_level["label"] = float("nan")
 
@@ -531,15 +540,13 @@ def main():
                         help=f"Threshold for insufficient_history_flag (default: {MIN_MONTHS_DEFAULT}).")
     parser.add_argument("--date-cutoff", default=DATE_CUTOFF,
                         help=f"Exclude months after this date (default: {DATE_CUTOFF}).")
-    parser.add_argument("--labels-csv", default=None,
-                        help="Path to provider_labels.csv from build_labels.py. If provided, joins label column.")
     parser.add_argument("--no-filter", action="store_true", default=False,
                         help="Keep all providers in output regardless of months_active.")
     args = parser.parse_args()
 
     provider_level = run(
         args.input_csv, args.output, args.dictionary_csv, args.dictionary_json,
-        args.labels_csv, args.min_months, args.date_cutoff,
+        args.min_months, args.date_cutoff,
         filter_output=not args.no_filter,
     )
 

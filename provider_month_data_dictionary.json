@@ -29,7 +29,7 @@
     "source_columns": "paid_amount",
     "grain": "provider-month",
     "data_type": "float",
-    "missing_value_logic": "Not missing when row exists (we only output provider-months with at least one billing row by default).",
+    "missing_value_logic": "Not missing when row exists.",
     "notes": ""
   },
   {
@@ -42,17 +42,6 @@
     "data_type": "float",
     "missing_value_logic": "Same as paid_t.",
     "notes": ""
-  },
-  {
-    "column_name": "beneficiaries_proxy_t",
-    "feature_group": "core_monthly",
-    "definition": "Sum of beneficiary_count across rows (proxy; may double-count across HCPCS).",
-    "formula_or_logic": "Sum of beneficiary_count.",
-    "source_columns": "beneficiary_count",
-    "grain": "provider-month",
-    "data_type": "float",
-    "missing_value_logic": "Same as paid_t; NaN if column absent.",
-    "notes": "Proxy: summing across HCPCS may double-count beneficiaries."
   },
   {
     "column_name": "hcpcs_count_t",
@@ -77,28 +66,6 @@
     "notes": ""
   },
   {
-    "column_name": "claims_per_beneficiaries_proxy_t",
-    "feature_group": "ratio",
-    "definition": "Claims per beneficiary proxy.",
-    "formula_or_logic": "claims_t / beneficiaries_proxy_t.",
-    "source_columns": "claims_t,beneficiaries_proxy_t",
-    "grain": "provider-month",
-    "data_type": "float",
-    "missing_value_logic": "NaN if beneficiaries_proxy_t==0 or missing.",
-    "notes": ""
-  },
-  {
-    "column_name": "paid_per_beneficiaries_proxy_t",
-    "feature_group": "ratio",
-    "definition": "Paid per beneficiary proxy.",
-    "formula_or_logic": "paid_t / beneficiaries_proxy_t.",
-    "source_columns": "paid_t,beneficiaries_proxy_t",
-    "grain": "provider-month",
-    "data_type": "float",
-    "missing_value_logic": "NaN if beneficiaries_proxy_t==0 or missing.",
-    "notes": ""
-  },
-  {
     "column_name": "top_code_paid_share",
     "feature_group": "code_mix",
     "definition": "Share of month paid from top HCPCS code.",
@@ -110,17 +77,6 @@
     "notes": ""
   },
   {
-    "column_name": "top_code_claim_share",
-    "feature_group": "code_mix",
-    "definition": "Share of month claims from top HCPCS code.",
-    "formula_or_logic": "max(code_claims) / claims_t.",
-    "source_columns": "claims_count,hcpcs_code",
-    "grain": "provider-month",
-    "data_type": "float",
-    "missing_value_logic": "NaN if claims_t==0 or no codes.",
-    "notes": ""
-  },
-  {
     "column_name": "top_3_code_paid_share",
     "feature_group": "code_mix",
     "definition": "Share of month paid from top 3 HCPCS codes.",
@@ -129,17 +85,6 @@
     "grain": "provider-month",
     "data_type": "float",
     "missing_value_logic": "NaN if paid_t==0.",
-    "notes": "If fewer than 3 codes, uses all."
-  },
-  {
-    "column_name": "top_3_code_claim_share",
-    "feature_group": "code_mix",
-    "definition": "Share of month claims from top 3 HCPCS codes.",
-    "formula_or_logic": "sum(top 3 code_claims) / claims_t.",
-    "source_columns": "claims_count,hcpcs_code",
-    "grain": "provider-month",
-    "data_type": "float",
-    "missing_value_logic": "NaN if claims_t==0.",
     "notes": "If fewer than 3 codes, uses all."
   },
   {
@@ -165,278 +110,29 @@
     "notes": ""
   },
   {
-    "column_name": "top_hcpcs_code_t",
-    "feature_group": "code_mix",
-    "definition": "HCPCS code with largest code-level paid in that month.",
-    "formula_or_logic": "argmax code_paid.",
-    "source_columns": "paid_amount,hcpcs_code",
-    "grain": "provider-month",
-    "data_type": "string",
-    "missing_value_logic": "NaN if no codes.",
-    "notes": "For interpretability/auditing."
+    "column_name": "label",
+    "feature_group": "support",
+    "definition": "LEIE exclusion label. 1 = provider NPI appears in LEIE; 0 = not excluded.",
+    "formula_or_logic": "Left join on NPI from provider_labels.csv (build_labels.py).",
+    "source_columns": [
+      "NPI"
+    ],
+    "grain": "provider-month (constant within provider)",
+    "data_type": "int (0 or 1)",
+    "missing_value_logic": "NaN if labels_csv not provided.",
+    "notes": "Same value repeated across all months for the same NPI."
   },
   {
-    "column_name": "mean_paid_per_code",
-    "feature_group": "code_distribution",
-    "definition": "Mean of code-level paid totals within month.",
-    "formula_or_logic": "mean(code_paid).",
-    "source_columns": "paid_amount,hcpcs_code",
-    "grain": "provider-month",
-    "data_type": "float",
-    "missing_value_logic": "NaN if no codes or inactive.",
-    "notes": "Across HCPCS codes within month, not across time."
-  },
-  {
-    "column_name": "median_paid_per_code",
-    "feature_group": "code_distribution",
-    "definition": "Median of code-level paid totals.",
-    "formula_or_logic": "median(code_paid).",
-    "source_columns": "paid_amount,hcpcs_code",
-    "grain": "provider-month",
-    "data_type": "float",
-    "missing_value_logic": "Same.",
-    "notes": ""
-  },
-  {
-    "column_name": "max_paid_single_code",
-    "feature_group": "code_distribution",
-    "definition": "Max code-level paid in month.",
-    "formula_or_logic": "max(code_paid).",
-    "source_columns": "paid_amount,hcpcs_code",
-    "grain": "provider-month",
-    "data_type": "float",
-    "missing_value_logic": "Same.",
-    "notes": ""
-  },
-  {
-    "column_name": "min_paid_single_code",
-    "feature_group": "code_distribution",
-    "definition": "Min code-level paid in month.",
-    "formula_or_logic": "min(code_paid).",
-    "source_columns": "paid_amount,hcpcs_code",
-    "grain": "provider-month",
-    "data_type": "float",
-    "missing_value_logic": "Same.",
-    "notes": ""
-  },
-  {
-    "column_name": "std_paid_per_code",
-    "feature_group": "code_distribution",
-    "definition": "Std dev of code-level paid within month.",
-    "formula_or_logic": "std(code_paid).",
-    "source_columns": "paid_amount,hcpcs_code",
-    "grain": "provider-month",
-    "data_type": "float",
-    "missing_value_logic": "NaN if fewer than 2 codes.",
-    "notes": ""
-  },
-  {
-    "column_name": "paid_code_range",
-    "feature_group": "code_distribution",
-    "definition": "Range of code-level paid (max - min).",
-    "formula_or_logic": "max_paid_single_code - min_paid_single_code.",
-    "source_columns": "paid_amount,hcpcs_code",
-    "grain": "provider-month",
-    "data_type": "float",
-    "missing_value_logic": "Same.",
-    "notes": ""
-  },
-  {
-    "column_name": "iqr_paid_per_code",
-    "feature_group": "code_distribution",
-    "definition": "IQR of code-level paid (Q3-Q1).",
-    "formula_or_logic": "Q3(code_paid) - Q1(code_paid).",
-    "source_columns": "paid_amount,hcpcs_code",
-    "grain": "provider-month",
-    "data_type": "float",
-    "missing_value_logic": "Same.",
-    "notes": ""
-  },
-  {
-    "column_name": "mad_paid_per_code",
-    "feature_group": "code_distribution",
-    "definition": "Median absolute deviation of code-level paid.",
-    "formula_or_logic": "median(|code_paid - median(code_paid)|).",
-    "source_columns": "paid_amount,hcpcs_code",
-    "grain": "provider-month",
-    "data_type": "float",
-    "missing_value_logic": "Same.",
-    "notes": ""
-  },
-  {
-    "column_name": "skew_paid_per_code",
-    "feature_group": "code_distribution",
-    "definition": "Skewness of code-level paid distribution.",
-    "formula_or_logic": "skew(code_paid).",
-    "source_columns": "paid_amount,hcpcs_code",
-    "grain": "provider-month",
-    "data_type": "float",
-    "missing_value_logic": "NaN if fewer than 3 codes.",
-    "notes": ""
-  },
-  {
-    "column_name": "kurt_paid_per_code",
-    "feature_group": "code_distribution",
-    "definition": "Kurtosis of code-level paid distribution.",
-    "formula_or_logic": "kurt(code_paid).",
-    "source_columns": "paid_amount,hcpcs_code",
-    "grain": "provider-month",
-    "data_type": "float",
-    "missing_value_logic": "NaN if fewer than 4 codes.",
-    "notes": ""
-  },
-  {
-    "column_name": "mean_claims_per_code",
-    "feature_group": "code_distribution",
-    "definition": "Mean of code-level claims within month.",
-    "formula_or_logic": "mean(code_claims).",
-    "source_columns": "claims_count,hcpcs_code",
-    "grain": "provider-month",
-    "data_type": "float",
-    "missing_value_logic": "Same as paid.",
-    "notes": ""
-  },
-  {
-    "column_name": "median_claims_per_code",
-    "feature_group": "code_distribution",
-    "definition": "Median of code-level claims.",
-    "formula_or_logic": "median(code_claims).",
-    "source_columns": "claims_count,hcpcs_code",
-    "grain": "provider-month",
-    "data_type": "float",
-    "missing_value_logic": "Same.",
-    "notes": ""
-  },
-  {
-    "column_name": "max_claims_single_code",
-    "feature_group": "code_distribution",
-    "definition": "Max code-level claims in month.",
-    "formula_or_logic": "max(code_claims).",
-    "source_columns": "claims_count,hcpcs_code",
-    "grain": "provider-month",
-    "data_type": "float",
-    "missing_value_logic": "Same.",
-    "notes": ""
-  },
-  {
-    "column_name": "min_claims_single_code",
-    "feature_group": "code_distribution",
-    "definition": "Min code-level claims in month.",
-    "formula_or_logic": "min(code_claims).",
-    "source_columns": "claims_count,hcpcs_code",
-    "grain": "provider-month",
-    "data_type": "float",
-    "missing_value_logic": "Same.",
-    "notes": ""
-  },
-  {
-    "column_name": "std_claims_per_code",
-    "feature_group": "code_distribution",
-    "definition": "Std dev of code-level claims.",
-    "formula_or_logic": "std(code_claims).",
-    "source_columns": "claims_count,hcpcs_code",
-    "grain": "provider-month",
-    "data_type": "float",
-    "missing_value_logic": "NaN if fewer than 2 codes.",
-    "notes": ""
-  },
-  {
-    "column_name": "claims_code_range",
-    "feature_group": "code_distribution",
-    "definition": "Range of code-level claims.",
-    "formula_or_logic": "max_claims_single_code - min_claims_single_code.",
-    "source_columns": "claims_count,hcpcs_code",
-    "grain": "provider-month",
-    "data_type": "float",
-    "missing_value_logic": "Same.",
-    "notes": ""
-  },
-  {
-    "column_name": "iqr_claims_per_code",
-    "feature_group": "code_distribution",
-    "definition": "IQR of code-level claims.",
-    "formula_or_logic": "Q3(code_claims) - Q1(code_claims).",
-    "source_columns": "claims_count,hcpcs_code",
-    "grain": "provider-month",
-    "data_type": "float",
-    "missing_value_logic": "Same.",
-    "notes": ""
-  },
-  {
-    "column_name": "mad_claims_per_code",
-    "feature_group": "code_distribution",
-    "definition": "MAD of code-level claims.",
-    "formula_or_logic": "median(|code_claims - median(code_claims)|).",
-    "source_columns": "claims_count,hcpcs_code",
-    "grain": "provider-month",
-    "data_type": "float",
-    "missing_value_logic": "Same.",
-    "notes": ""
-  },
-  {
-    "column_name": "skew_claims_per_code",
-    "feature_group": "code_distribution",
-    "definition": "Skewness of code-level claims.",
-    "formula_or_logic": "skew(code_claims).",
-    "source_columns": "claims_count,hcpcs_code",
-    "grain": "provider-month",
-    "data_type": "float",
-    "missing_value_logic": "NaN if fewer than 3 codes.",
-    "notes": ""
-  },
-  {
-    "column_name": "kurt_claims_per_code",
-    "feature_group": "code_distribution",
-    "definition": "Kurtosis of code-level claims.",
-    "formula_or_logic": "kurt(code_claims).",
-    "source_columns": "claims_count,hcpcs_code",
-    "grain": "provider-month",
-    "data_type": "float",
-    "missing_value_logic": "NaN if fewer than 4 codes.",
-    "notes": ""
-  },
-  {
-    "column_name": "num_codes_above_mean_paid",
-    "feature_group": "code_distribution",
-    "definition": "Count of HCPCS codes with code-level paid strictly above mean.",
-    "formula_or_logic": "count(code_paid > mean_paid_per_code).",
-    "source_columns": "paid_amount,hcpcs_code",
-    "grain": "provider-month",
-    "data_type": "int",
-    "missing_value_logic": "0 or count.",
-    "notes": ""
-  },
-  {
-    "column_name": "num_codes_above_mean_claims",
-    "feature_group": "code_distribution",
-    "definition": "Count of HCPCS codes with code-level claims strictly above mean.",
-    "formula_or_logic": "count(code_claims > mean_claims_per_code).",
-    "source_columns": "claims_count,hcpcs_code",
-    "grain": "provider-month",
-    "data_type": "int",
-    "missing_value_logic": "Same.",
-    "notes": ""
-  },
-  {
-    "column_name": "paid_code_energy",
-    "feature_group": "code_distribution",
-    "definition": "Sum of squared code-level paid totals.",
-    "formula_or_logic": "sum(code_paid^2).",
-    "source_columns": "paid_amount,hcpcs_code",
-    "grain": "provider-month",
-    "data_type": "float",
-    "missing_value_logic": "NaN if no codes.",
-    "notes": ""
-  },
-  {
-    "column_name": "claims_code_energy",
-    "feature_group": "code_distribution",
-    "definition": "Sum of squared code-level claims totals.",
-    "formula_or_logic": "sum(code_claims^2).",
-    "source_columns": "claims_count,hcpcs_code",
-    "grain": "provider-month",
-    "data_type": "float",
-    "missing_value_logic": "Same.",
-    "notes": ""
+    "column_name": "excldate",
+    "feature_group": "support",
+    "definition": "LEIE exclusion date in YYYYMMDD format. Null for non-excluded providers.",
+    "formula_or_logic": "Joined from LEIE dataset EXCLDATE column via NPI match.",
+    "source_columns": [
+      "EXCLDATE"
+    ],
+    "grain": "provider-month (constant within provider)",
+    "data_type": "string (YYYYMMDD)",
+    "missing_value_logic": "NaN for providers with label=0.",
+    "notes": "Same value repeated across all months for the same NPI."
   }
 ]
