@@ -1,5 +1,5 @@
 defaults:
-  - splitter: none
+  - splitter: unsupervised
   - _self_
 
 _target_: anomaly_detect.data.anomaly_datamodule.AnomalyDataModule
@@ -9,17 +9,30 @@ _target_: anomaly_detect.data.anomaly_datamodule.AnomalyDataModule
 # Should already be filtered to a single cohort if running cohort-by-cohort.
 provider_month_csv: ???
 
-# Cache path for the computed provider_level.csv.
-# null = auto-generate next to provider_month_csv as provider_level_{stem}.csv
-provider_level_csv: null
+# Output path for the computed provider_level.csv (always created fresh).
+provider_level_csv: ${paths.output_dir}/provider_level.csv
 
 # ── Provider-level feature creation subprocess params ─────────────────────────
 # These are passed to scripts/create_provider_level_from_month.py as CLI args.
 provider_level_script: ${paths.scripts_dir}/create_provider_level_from_month.py
-dictionary_json: ${paths.root_dir}/provider_level_data_dictionary.json
 min_months: 6
 date_cutoff: "2024-12-31"
 no_filter: false
+
+# ── Provider-level feature engineering (mirrors scripts/config.yaml) ──────────
+# A temp config.yaml is written from these values and passed to the subprocess,
+# so all tuning lives here — scripts/config.yaml is no longer the source of truth.
+provider_level_features:
+  pct_growth_prior_floor: 10.0
+  rolling_flags:
+    window_obs: 3
+    robust_z_threshold: 2.5
+    last_k_observed: 6
+  changepoints:
+    penalty: 2.0
+    model: "rbf"
+    min_size: 3
+    min_obs: 6
 
 # ── Feature cleaning ──────────────────────────────────────────────────────────
 # Columns with NaN fraction > this threshold are dropped first;
@@ -27,11 +40,9 @@ no_filter: false
 nan_drop_threshold: 0.05
 
 # ── Feature selection ─────────────────────────────────────────────────────────
+# Set auroc_threshold to null to disable filtering and use all features.
 feature_selection:
-  method: auroc             # auroc | none
   auroc_threshold: 0.65
-  variance_min: null        # optional: drop near-zero variance features (e.g. 0.01)
-  corr_dedup_threshold: null # optional: drop correlated pairs (e.g. 0.95), keep higher-AUROC
 
 # ── Columns never used as model inputs ────────────────────────────────────────
 exclude_cols:
@@ -55,6 +66,3 @@ num_workers: 0
 pin_memory: false
 scaler: standardize        # standardize | minmax | none
 
-# For autoencoder: only use label=0 providers in the training dataloader.
-# Has no effect on sklearn models (they use X_train_np/y_train_np directly).
-train_on_negatives: false

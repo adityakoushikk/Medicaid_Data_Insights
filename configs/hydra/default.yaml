@@ -1,8 +1,8 @@
 run:
-  dir: ${paths.log_dir}/anomaly_detect/runs/${now:%Y-%m-%d_%H-%M-%S}
+  dir: ${paths.root_dir}/outputs/${now:%Y-%m-%d_%H-%M-%S}
 
 sweep:
-  dir: ${paths.log_dir}/anomaly_detect/multiruns/${now:%Y-%m-%d_%H-%M-%S}
+  dir: ${paths.root_dir}/outputs/multirun/${now:%Y-%m-%d_%H-%M-%S}
   subdir: ${hydra.job.num}
 
 job_logging:

@@ -1,7 +1,0 @@
-_target_: anomaly_detect.models.architectures.logistic_regression.LogisticRegressionModel
-C: 1.0
-class_weight: balanced    # balanced | null
-solver: lbfgs
-max_iter: 1000
-random_state: 42
-evaluation_set: test      # score held-out test split only (unbiased)

@@ -1,8 +1,0 @@
-_target_: anomaly_detect.models.architectures.isolation_forest.IsolationForestModel
-n_estimators: 200
-contamination: auto
-max_samples: auto
-max_features: 1.0
-bootstrap: false
-random_state: 42
-evaluation_set: all   # score all providers

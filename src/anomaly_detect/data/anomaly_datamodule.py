@@ -24,7 +24,7 @@ import torch
 from torch.utils.data import DataLoader, Subset
 
 from anomaly_detect.data.anomaly_dataset import AnomalyDataset
-from anomaly_detect.data.provider_level_runner import run_provider_level
+from provider_level_runner import run_provider_level  # scripts/ on PYTHONPATH via run_anomaly.sh
 
 log = logging.getLogger(__name__)
 
@@ -46,13 +46,13 @@ class AnomalyDataModule(L.LightningDataModule):
     def __init__(
         self,
         provider_month_csv: str,
+        provider_level_csv: str,
         provider_level_script: str,
-        dictionary_json: str,
         splitter,
-        provider_level_csv: Optional[str] = None,
         min_months: int = 6,
         date_cutoff: str = "2024-12-31",
         no_filter: bool = False,
+        provider_level_features: Optional[dict] = None,
         nan_drop_threshold: float = 0.05,
         feature_selection: Optional[dict] = None,
         exclude_cols: Optional[List[str]] = None,
@@ -60,12 +60,11 @@ class AnomalyDataModule(L.LightningDataModule):
         num_workers: int = 0,
         pin_memory: bool = False,
         scaler: str = "standardize",
-        train_on_negatives: bool = False,
     ):
         super().__init__()
         self.save_hyperparameters(ignore=["splitter"])
         self.splitter = splitter
-        self.feature_selection = feature_selection or {"method": "auroc", "auroc_threshold": 0.65}
+        self.feature_selection = feature_selection or {"auroc_threshold": 0.65}
         self.exclude_cols = _ALWAYS_EXCLUDE | set(exclude_cols or [])
 
         # Populated during setup()
@@ -78,17 +77,10 @@ class AnomalyDataModule(L.LightningDataModule):
         self.feature_names: Optional[List[str]] = None
         self.auroc_df: Optional[pd.DataFrame] = None
 
-        # Numpy arrays for sklearn models (set during setup)
+        # Full scaled arrays for post-training scoring (set during setup)
         self.X_all_np: Optional[np.ndarray] = None
         self.y_all_np: Optional[np.ndarray] = None
         self.npis_all: Optional[np.ndarray] = None
-
-        self.X_train_np: Optional[np.ndarray] = None
-        self.y_train_np: Optional[np.ndarray] = None
-
-        self.X_test_np: Optional[np.ndarray] = None
-        self.y_test_np: Optional[np.ndarray] = None
-        self.npis_test: Optional[np.ndarray] = None
 
     # ── Properties ────────────────────────────────────────────────────────────
 
@@ -100,31 +92,19 @@ class AnomalyDataModule(L.LightningDataModule):
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
-    def _cache_path(self) -> Path:
-        if self.hparams.provider_level_csv:
-            return Path(self.hparams.provider_level_csv)
-        src = Path(self.hparams.provider_month_csv)
-        return src.parent / f"provider_level_{src.stem}.csv"
-
     def _get_or_compute_features(self) -> pd.DataFrame:
-        cache = self._cache_path()
-        if cache.is_file():
-            log.info(f"Loading cached provider_level: {cache}")
-            return pd.read_csv(cache, low_memory=False)
-
-        log.info(f"Cache not found — running provider_level script → {cache}")
-        dict_csv = str(cache.parent / f"provider_level_dict_{cache.stem}.csv")
+        out = Path(self.hparams.provider_level_csv)
+        log.info(f"Running provider_level script → {out}")
         run_provider_level(
             input_csv=self.hparams.provider_month_csv,
-            output_csv=str(cache),
+            output_csv=str(out),
             provider_level_script=self.hparams.provider_level_script,
-            dictionary_json=self.hparams.dictionary_json,
-            dictionary_csv=dict_csv,
             min_months=self.hparams.min_months,
             date_cutoff=self.hparams.date_cutoff,
             no_filter=self.hparams.no_filter,
+            provider_level_features=self.hparams.provider_level_features,
         )
-        return pd.read_csv(cache, low_memory=False)
+        return pd.read_csv(out, low_memory=False)
 
     def _clean_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Drop high-NaN columns then drop remaining NaN rows (from feature cols only)."""
@@ -148,63 +128,37 @@ class AnomalyDataModule(L.LightningDataModule):
         return df.reset_index(drop=True)
 
     def _select_features(self, X: pd.DataFrame, y: np.ndarray) -> List[str]:
-        """Return list of feature column names after applying selection methods."""
-        cols = list(X.columns)
-        method = self.feature_selection.get("method", "none")
+        """Select features by univariate AUROC threshold.
 
-        # ── Optional: variance filter ──────────────────────────────────────
-        var_min = self.feature_selection.get("variance_min", None)
-        if var_min is not None:
-            variances = X[cols].var()
-            low_var = variances[variances < var_min].index.tolist()
-            cols = [c for c in cols if c not in low_var]
-            log.info(f"Variance filter (<{var_min}): removed {len(low_var)}, {len(cols)} remain.")
+        If auroc_threshold is null in config, all features are kept and AUROC
+        is still computed (stored in auroc_df) but not used for filtering.
+        """
+        threshold = self.feature_selection.get("auroc_threshold")
+        if threshold is None:
+            log.info(f"Feature selection disabled — keeping all {len(X.columns)} features.")
+            return list(X.columns)
 
-        # ── Univariate AUROC filter ────────────────────────────────────────
-        if method == "auroc":
-            threshold = self.feature_selection.get("auroc_threshold", 0.65)
-            rows = []
-            for feat in cols:
-                series = X[feat].values
-                valid_mask = ~np.isnan(series)
-                xv, yv = series[valid_mask], y[valid_mask]
-                if len(np.unique(yv)) < 2:
-                    continue
-                try:
-                    auc = roc_auc_score(yv, xv)
-                    auc = max(auc, 1 - auc)
-                    rows.append({"feature": feat, "auroc": round(float(auc), 4)})
-                except Exception:
-                    continue
-            self.auroc_df = (
-                pd.DataFrame(rows)
-                .sort_values("auroc", ascending=False)
-                .reset_index(drop=True)
-            )
-            cols = self.auroc_df[self.auroc_df["auroc"] >= threshold]["feature"].tolist()
-            log.info(f"AUROC >= {threshold}: {len(cols)} features selected.")
-
-        # ── Optional: correlation deduplication ───────────────────────────
-        corr_thresh = self.feature_selection.get("corr_dedup_threshold", None)
-        if corr_thresh is not None and len(cols) > 1:
-            auroc_map = (
-                dict(zip(self.auroc_df["feature"], self.auroc_df["auroc"]))
-                if self.auroc_df is not None
-                else {}
-            )
-            corr_matrix = X[cols].corr().abs()
-            to_drop: set = set()
-            for i, ci in enumerate(cols):
-                for cj in cols[i + 1:]:
-                    if ci in to_drop or cj in to_drop:
-                        continue
-                    if corr_matrix.loc[ci, cj] >= corr_thresh:
-                        drop = ci if auroc_map.get(ci, 0) < auroc_map.get(cj, 0) else cj
-                        to_drop.add(drop)
-            cols = [c for c in cols if c not in to_drop]
-            log.info(f"Corr dedup (>={corr_thresh}): removed {len(to_drop)}, {len(cols)} remain.")
-
-        return cols
+        rows = []
+        for feat in X.columns:
+            series = X[feat].values
+            valid_mask = ~np.isnan(series)
+            xv, yv = series[valid_mask], y[valid_mask]
+            if len(np.unique(yv)) < 2:
+                continue
+            try:
+                auc = roc_auc_score(yv, xv)
+                auc = max(auc, 1 - auc)
+                rows.append({"feature": feat, "auroc": round(float(auc), 4)})
+            except Exception:
+                continue
+        self.auroc_df = (
+            pd.DataFrame(rows)
+            .sort_values("auroc", ascending=False)
+            .reset_index(drop=True)
+        )
+        selected = self.auroc_df[self.auroc_df["auroc"] >= threshold]["feature"].tolist()
+        log.info(f"AUROC >= {threshold}: {len(selected)} / {len(X.columns)} features selected.")
+        return selected
 
     def _fit_scale(self, X: np.ndarray, train_idx: np.ndarray) -> np.ndarray:
         scaler_type = self.hparams.scaler
@@ -257,19 +211,13 @@ class AnomalyDataModule(L.LightningDataModule):
         # Build dataset (full)
         self._dataset = AnomalyDataset(X_scaled, y, npis)
 
-        # Expose numpy arrays for sklearn models
+        # Full arrays for post-training scoring
         self.X_all_np = X_scaled
         self.y_all_np = y
         self.npis_all = npis
 
         _tr = train_idx if len(train_idx) else np.arange(len(X))
-        self.X_train_np = X_scaled[_tr]
-        self.y_train_np = y[_tr]
-
         _te = test_idx if len(test_idx) else np.arange(len(X))
-        self.X_test_np = X_scaled[_te]
-        self.y_test_np = y[_te]
-        self.npis_test = npis[_te]
 
         log.info(
             f"Setup complete | {len(X):,} providers | {self.n_features} features | "
@@ -290,17 +238,19 @@ class AnomalyDataModule(L.LightningDataModule):
             pin_memory=self.hparams.pin_memory,
         )
 
+    def _label0_idx(self, idx: np.ndarray) -> np.ndarray:
+        """Filter index array to label=0 (normal) providers only."""
+        neg_mask = self._dataset.y.numpy() == 0
+        return idx[neg_mask[idx]]
+
     def train_dataloader(self) -> DataLoader:
         idx = self._train_idx if len(self._train_idx) else np.arange(len(self._dataset))
-        if self.hparams.train_on_negatives:
-            neg_mask = self._dataset.y.numpy() == 0
-            idx = idx[neg_mask[idx]]
-        return self._make_loader(idx, shuffle=True)
+        return self._make_loader(self._label0_idx(idx), shuffle=True)
 
     def val_dataloader(self) -> Optional[DataLoader]:
         if self._val_idx is None or len(self._val_idx) == 0:
             return None
-        return self._make_loader(self._val_idx, shuffle=False)
+        return self._make_loader(self._label0_idx(self._val_idx), shuffle=False)
 
     def test_dataloader(self) -> DataLoader:
         idx = self._test_idx if len(self._test_idx) else np.arange(len(self._dataset))

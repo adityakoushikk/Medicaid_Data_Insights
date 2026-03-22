@@ -1,20 +1,45 @@
+# Python
 venv/
+.venv/
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment
+.env
+.env.*
+
+# macOS
 .DS_Store
 
-# data files
+# Data files (large inputs/outputs — never commit)
+data/datasets/
+data/outputs/
 *.csv
 *.parquet
 *.xlsx
 *.xls
 
-# jupyter
-.ipynb_checkpoints/
+# Hydra outputs
+outputs/
+multirun/
 
-# env
-.env
+# WANDB
+wandb/
 
-# subprojects
+# Temp configs written by provider_level_runner
+/tmp/provider_level_cfg_*.yaml
+
+# IDEs
+.vscode/
+.idea/
+
+# Subprojects
 acp-learn-model/

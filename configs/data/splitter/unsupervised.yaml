@@ -1,0 +1,5 @@
+_target_: anomaly_detect.data.splitters.unsupervised_splitter.UnsupervisedSplitter
+# 10% of providers held out for val/loss monitoring and early stopping.
+# Set val_frac=0.0 to disable and train for the full max_epochs.
+val_frac: 0.1
+seed: 42

@@ -1,6 +1,5 @@
-# Callbacks for neural model (autoencoder) training.
-# early_stopping requires a val split (splitter: stratified_kfold).
-# Remove or comment out if using splitter: none.
+# EarlyStopping monitors val/loss (requires val_frac > 0.0 in splitter config).
+# Automatically disabled in train.py if no val split is present.
 
 early_stopping:
   _target_: lightning.pytorch.callbacks.EarlyStopping

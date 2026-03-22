@@ -14,5 +14,3 @@ optimizer:
   lr: 0.001
   weight_decay: 1.0e-5
 
-# Which data to score after training (all providers)
-evaluation_set: all

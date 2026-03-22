@@ -1,6 +1,0 @@
-_target_: anomaly_detect.data.splitters.stratified_kfold_splitter.StratifiedKFoldSplitter
-n_splits: 5
-fold_index: 0
-shuffle: true
-seed: 42
-val_frac: 0.1
