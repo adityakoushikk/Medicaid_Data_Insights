@@ -1,0 +1,19 @@
+defaults:
+  - paths: default
+  - data: default
+  - model: autoencoder
+  - trainer: default
+  - logger: csv
+  - callbacks: default
+  - hydra: default
+  - _self_
+
+task_name: anomaly_detect
+tags: ["anomaly", "dev"]
+seed: 42
+
+# Percentiles for lift@K reporting. e.g. top 1% = top N*0.01 providers.
+lift_percentiles: [0.5, 1, 2, 3, 5, 10]
+
+# Optimized metric name (for sweep selection).
+optimized_metric: "lift_top_2pct"

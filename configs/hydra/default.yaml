@@ -1,0 +1,11 @@
+run:
+  dir: data/outputs/${now:%Y-%m-%d_%H-%M-%S}
+
+sweep:
+  dir: data/outputs/multirun/${now:%Y-%m-%d_%H-%M-%S}
+  subdir: ${hydra.job.num}
+
+job_logging:
+  handlers:
+    file:
+      filename: ${hydra:runtime.output_dir}/anomaly_detect.log

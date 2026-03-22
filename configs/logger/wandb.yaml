@@ -1,0 +1,6 @@
+_target_: lightning.pytorch.loggers.WandbLogger
+project: anomaly-detect
+offline: false
+log_model: false
+group: ""
+tags: ${tags}

@@ -14,7 +14,6 @@ Key tuning knobs live in config.yaml under provider_level_features.
 """
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
@@ -34,7 +33,30 @@ except ImportError:
 _CONFIG_PATH = Path(__file__).parent / "config.yaml"
 
 
+#overridden at runtime when --config is passed from the Hydra pipeline.
+_DEFAULT_CONFIG: dict = {
+    "date_cutoff": "2024-12-31",
+    "provider_level_features": {
+        "min_months_observed": 6,
+        "pct_growth_prior_floor": 10.0,
+        "rolling_flags": {
+            "window_obs": 3,
+            "robust_z_threshold": 2.5,
+            "last_k_observed": 6,
+        },
+        "changepoints": {
+            "penalty": 2.0,
+            "model": "rbf",
+            "min_size": 3,
+            "min_obs": 6,
+        },
+    },
+}
+
+
 def _load_config(path: Path = _CONFIG_PATH) -> dict:
+    if not path.is_file():
+        return _DEFAULT_CONFIG
     with open(path) as f:
         return yaml.safe_load(f)
 
@@ -42,10 +64,9 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
 _cfg_root = _load_config()
 _cfg      = _cfg_root["provider_level_features"]
 
-DEFAULT_OUTPUT_CSV     = "provider_level.csv"
-DEFAULT_DICTIONARY_CSV = "provider_level_data_dictionary.csv"
-DATE_CUTOFF            = _cfg_root["date_cutoff"]
-MIN_MONTHS_DEFAULT     = _cfg["min_months_observed"]
+DEFAULT_OUTPUT_CSV = "provider_level.csv"
+DATE_CUTOFF        = _cfg_root["date_cutoff"]
+MIN_MONTHS_DEFAULT = _cfg["min_months_observed"]
 
 
 # ── Column eligibility ─────────────────────────────────────────────────────────
@@ -444,54 +465,6 @@ def build_provider_level(
     return pd.DataFrame(rows).reset_index(drop=True)
 
 
-# ── Data dictionary: loaded from external JSON ────────────────────────────────
-# Edit provider_level_data_dictionary.json to change definitions without touching code.
-_DEFAULT_DICT_JSON = Path(__file__).parent.parent / "provider_level_data_dictionary.json"
-
-DICTIONARY_ENTRY_KEYS = (
-    "column_name", "feature_group", "definition", "formula_or_logic",
-    "source_columns", "grain", "data_type", "missing_value_logic", "notes",
-)
-
-
-def load_data_dictionary_metadata(json_path: str) -> list[dict]:
-    """Load and validate data dictionary entries from the JSON file."""
-    path = Path(json_path)
-    if not path.is_file():
-        raise FileNotFoundError(
-            f"Data dictionary JSON not found: {json_path}. "
-            "Create it or pass a valid --dictionary-json path."
-        )
-    with open(path, encoding="utf-8") as f:
-        data = json.load(f)
-    if not isinstance(data, list):
-        raise ValueError(f"Data dictionary JSON must be an array; got {type(data).__name__}")
-    for i, entry in enumerate(data):
-        missing_keys = set(DICTIONARY_ENTRY_KEYS) - set(entry)
-        if missing_keys:
-            raise ValueError(
-                f"Entry at index {i} (column '{entry.get('column_name', '?')}') "
-                f"missing keys: {missing_keys}"
-            )
-    return data
-
-
-def build_data_dictionary(df: pd.DataFrame, json_path: str) -> pd.DataFrame:
-    """Load the data dictionary from JSON, validate against df columns, reorder to match df."""
-    meta     = load_data_dictionary_metadata(json_path)
-    dict_df  = pd.DataFrame(meta)
-    dict_cols   = set(dict_df["column_name"])
-    actual_cols = set(df.columns)
-    missing_in_dict = actual_cols - dict_cols
-    extra_in_dict   = dict_cols - actual_cols
-    if missing_in_dict:
-        raise ValueError(f"Data dictionary missing entries for columns: {missing_in_dict}")
-    if extra_in_dict:
-        raise ValueError(f"Data dictionary has entries for columns not in output: {extra_in_dict}")
-    order   = [c for c in df.columns if c in dict_df["column_name"].values]
-    dict_df = dict_df.set_index("column_name").loc[order].reset_index()
-    return dict_df
-
 
 # ── I/O ────────────────────────────────────────────────────────────────────────
 def load_provider_month(path: str) -> pd.DataFrame:
@@ -509,13 +482,11 @@ def load_provider_month(path: str) -> pd.DataFrame:
 def run(
     input_csv: str,
     output_csv: str = DEFAULT_OUTPUT_CSV,
-    dictionary_csv: str = DEFAULT_DICTIONARY_CSV,
-    dictionary_json: str = str(_DEFAULT_DICT_JSON),
     min_months: int = MIN_MONTHS_DEFAULT,
     date_cutoff: str = DATE_CUTOFF,
     filter_output: bool = True,
 ) -> pd.DataFrame:
-    """Build features, load dictionary from JSON, save CSVs.
+    """Build provider-level features and save CSV.
 
     NaN is never imputed with 0 — undefined features propagate to the output.
     The only hard filter applied is providers whose median paid_t == 0
@@ -568,22 +539,11 @@ def run(
     else:
         provider_level["label"] = float("nan")
 
-    # ── Save provider-level CSV ───────────────────────────────────────────────
     out_path = Path(output_csv)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     provider_level.to_csv(out_path, index=False)
-    print(f"Output CSV:       {out_path.resolve()}")
-    print(f"Output shape:     {provider_level.shape}")
-
-    # ── Load dictionary from JSON and validate against output columns ─────────
-    data_dict_df = build_data_dictionary(provider_level, dictionary_json)
-    csv_path = Path(dictionary_csv)
-    if not csv_path.is_absolute():
-        csv_path = out_path.parent / csv_path
-    csv_path.parent.mkdir(parents=True, exist_ok=True)
-    data_dict_df.to_csv(csv_path, index=False)
-    print(f"Dictionary CSV:   {csv_path.resolve()}  ({len(data_dict_df):,} entries)")
-
+    print(f"Output CSV:   {out_path.resolve()}")
+    print(f"Output shape: {provider_level.shape}")
     return provider_level
 
 
@@ -595,21 +555,25 @@ def main():
                         help="Path to provider-month CSV.")
     parser.add_argument("--output", default=DEFAULT_OUTPUT_CSV,
                         help=f"Output CSV path (default: {DEFAULT_OUTPUT_CSV}).")
-    parser.add_argument("--dictionary-csv", default=DEFAULT_DICTIONARY_CSV,
-                        help=f"Output path for data dictionary CSV (default: {DEFAULT_DICTIONARY_CSV}).")
-    parser.add_argument("--dictionary-json", default=str(_DEFAULT_DICT_JSON),
-                        help=f"Path to data dictionary JSON (default: {_DEFAULT_DICT_JSON}).")
     parser.add_argument("--min-months", type=int, default=MIN_MONTHS_DEFAULT,
                         help=f"Threshold for insufficient_history_flag (default: {MIN_MONTHS_DEFAULT}).")
     parser.add_argument("--date-cutoff", default=DATE_CUTOFF,
                         help=f"Exclude months after this date (default: {DATE_CUTOFF}).")
     parser.add_argument("--no-filter", action="store_true", default=False,
                         help="Keep all providers in output regardless of months_observed.")
+    parser.add_argument("--config", default=None,
+                        help="Override path to config.yaml (default: scripts/config.yaml). "
+                             "Useful when called from the Hydra pipeline with a temp config.")
     args = parser.parse_args()
 
+    # Reload globals from an alternate config if provided.
+    if args.config:
+        global _cfg_root, _cfg
+        _cfg_root = _load_config(Path(args.config))
+        _cfg = _cfg_root["provider_level_features"]
+
     provider_level = run(
-        args.input_csv, args.output, args.dictionary_csv,
-        args.dictionary_json,
+        args.input_csv, args.output,
         args.min_months, args.date_cutoff,
         filter_output=not args.no_filter,
     )

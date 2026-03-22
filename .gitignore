@@ -1,20 +1,58 @@
+# Python
 venv/
+.venv/
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment
+.env
+.env.*
+
+# macOS
 .DS_Store
 
-# data files
+# Data files (large inputs/outputs — never commit)
+data/datasets/*
+data/outputs/*
 *.csv
 *.parquet
 *.xlsx
 *.xls
 
-# jupyter
-.ipynb_checkpoints/
+# Keep directory structure visible on git
+!data/datasets/.gitkeep
+!data/outputs/.gitkeep
 
-# env
-.env
+# Dictionary files at repo root (tracked)
+!parameter_dictionary.csv
+!provider_level_data_dictionary.csv
+!provider_month_data_dictionary.csv
 
-# subprojects
+# Hydra outputs
+outputs/
+multirun/
+
+# WANDB
+wandb/
+
+# Temp configs written by provider_level_runner
+/tmp/provider_level_cfg_*.yaml
+
+# IDEs
+.vscode/
+.idea/
+
+# Subprojects
 acp-learn-model/
+
+# Stale Lightning/WANDB artifacts
+anomaly-detect/
+lightning_logs/

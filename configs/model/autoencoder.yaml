@@ -1,0 +1,16 @@
+# Neural network sub-config (instantiated as Autoencoder)
+net:
+  _target_: anomaly_detect.models.architectures.autoencoder.Autoencoder
+  input_dim: ???            # set dynamically from datamodule.n_features
+  encoder_dims: [64, 32, 16]
+  bottleneck_dim: 8
+  dropout_rate: 0.1
+  activation: relu          # relu | leaky_relu | tanh | selu
+  use_batch_norm: true
+
+# Optimizer (passed to AnomalyLitModule)
+optimizer:
+  _target_: torch.optim.Adam
+  lr: 0.001
+  weight_decay: 1.0e-5
+

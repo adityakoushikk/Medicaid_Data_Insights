@@ -1,0 +1,18 @@
+# EarlyStopping monitors val/loss (requires val_frac > 0.0 in splitter config).
+# Automatically disabled in train.py if no val split is present.
+
+early_stopping:
+  _target_: lightning.pytorch.callbacks.EarlyStopping
+  monitor: val/loss
+  patience: 10
+  mode: min
+  verbose: false
+
+model_checkpoint:
+  _target_: lightning.pytorch.callbacks.ModelCheckpoint
+  dirpath: ${paths.output_dir}/checkpoints
+  monitor: val/loss
+  mode: min
+  save_top_k: 1
+  filename: best
+  verbose: false

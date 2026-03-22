@@ -1,0 +1,69 @@
+defaults:
+  - splitter: unsupervised
+  - _self_
+
+_target_: anomaly_detect.data.anomaly_datamodule.AnomalyDataModule
+
+# ── Input ─────────────────────────────────────────────────────────────────────
+# Path to the provider_month CSV (output of create_provider_month_dataset.py).
+# Should already be filtered to a single cohort if running cohort-by-cohort.
+provider_month_csv: ???
+
+# Path to an existing provider_level.csv to skip recomputation, or null to compute fresh.
+# null = auto-generate next to provider_month_csv as provider_level_{stem}.csv
+provider_level_csv: null
+
+# ── Provider-level feature creation subprocess params ─────────────────────────
+# These are passed to scripts/create_provider_level_from_month.py as CLI args.
+provider_level_script: ${paths.scripts_dir}/create_provider_level_from_month.py
+min_months: 6
+date_cutoff: "2024-12-31"
+no_filter: false
+
+# ── Provider-level feature engineering (mirrors scripts/config.yaml) ──────────
+# A temp config.yaml is written from these values and passed to the subprocess,
+# so all tuning lives here — scripts/config.yaml is no longer the source of truth.
+provider_level_features:
+  pct_growth_prior_floor: 10.0
+  rolling_flags:
+    window_obs: 3
+    robust_z_threshold: 2.5
+    last_k_observed: 6
+  changepoints:
+    penalty: 2.0
+    model: "rbf"
+    min_size: 3
+    min_obs: 6
+
+# ── Feature cleaning ──────────────────────────────────────────────────────────
+# Columns with NaN fraction > this threshold are dropped first;
+# then any remaining rows with NaN are dropped.
+nan_drop_threshold: 0.05
+
+# ── Feature selection ─────────────────────────────────────────────────────────
+# Set auroc_threshold to null to disable filtering and use all features.
+feature_selection:
+  auroc_threshold: 0.65
+
+# ── Columns never used as model inputs ────────────────────────────────────────
+exclude_cols:
+  - label
+  - excldate
+  - billing_provider_npi
+  - insufficient_history_flag
+  - cohort_label
+  - months_observed
+  - first_month
+  - last_month
+  - span_months
+  - missing_months_within_span
+  - fraction_months_observed
+  - mean_gap_months
+  - max_gap_months
+
+# ── DataLoader ────────────────────────────────────────────────────────────────
+batch_size: 64
+num_workers: 0
+pin_memory: false
+scaler: standardize        # standardize | minmax | none
+
