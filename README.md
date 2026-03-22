@@ -1,5 +1,18 @@
 # Medicaid Provider Anomaly Detection
 
+# Product Rationale
+
+**Problem** — Medicaid oversight teams can't manually review every provider
+- LEIE labels sparse and incomplete — don't cover all problematic billing
+- No scalable way to prioritize who to investigate first
+
+**Solution** — score and rank providers within comparable cohorts
+- Cohort-scoped model — reconstruction baseline is meaningful
+- High anomaly score = billing pattern unlike similar peers, not just unlike all providers nationally
+- Investigators focus limited review capacity on top-ranked providers or use adjacent to labels/other metrics to help investigate fraud 
+
+---
+
 # Setup
 
 ### 1. Install dependencies
@@ -95,8 +108,7 @@ Each layer: Linear + BatchNorm + ReLU. Dropout=0.1.
 
 # Usage
 
-One cohort at a time — e.g. `NV_organization`, `TX_individual`. *(Multi-cohort batch support planned.)*
-
+One cohort at a time — e.g. `NV_organization`, `TX_individual`. 
 ### 1. Build provider-month dataset
 
 Preprocessing pipeline for chosen cohort (label construction, cohort assignment, feature aggregation):
@@ -232,4 +244,67 @@ data.batch_size=128
   data.feature_selection.auroc_threshold=0.55,0.65,null \
   data.provider_level_features.changepoints.penalty=1.0,2.0
 ```
+
+---
+
+# Threat Model & Retention / Deletion Policy
+
+> **Disclaimer:** Basic policy based on current pipeline — incomplete. See tradeoffs section for required improvements.
+
+**Threats / oversights**
+- High anomaly score ≠ proof of fraud — misuse risk if outputs leave internal review context
+- False positives — normal providers flagged due to unusual-but-legitimate billing patterns
+- LEIE labels overinterpreted as ground truth 
+- Ranked output shared or acted on outside intended investigative context
+
+**Retention policy**
+- Keep raw data only for reproducibility
+- Keep `scored_providers.csv` per cohort as final output
+- Top 10% highest-scored providers — treat as sensitive, flag for further investigation
+  - Best run captured ~60% of LEIE labels in top 10% (likely higher — most LEIE data missing/unjoinable)
+- `DO NOT` present high-ranked providers as confirmed fraud
+
+---
+
+# Scaling & Compliance
+
+**Intended use**
+- Batch pipeline, not a live decision system
+- Triage / prioritization tool — not an automated fraud detector
+- Internal program integrity use only
+
+**Pipeline**
+- Build provider-month → provider-level features from Medicaid data
+- Score providers separately within cohorts (state, entity type, service type)
+- Output ranked review list per cohort
+
+**Governance**
+- Human review required before acting on any flagged provider
+- Flagged provider outputs access-controlled
+- State data quality varies — results should be interpreted in that context
+
+---
+
+# Tradeoffs & Future Plans
+
+> **Core issue:** pipeline is still semi supervised in practice — feature selection uses AUROC against LEIE labels, and evaluation is LEIE-dependent. True unsupervised operation requires either better labels or a fully label-free feature selection method.
+
+| Problem | Detail | Future Plan |
+|---|---|---|
+| **Weak labels** | LEIE incomplete/noisy — many exclusion NPIs couldn't be joined to Medicaid data; lift against LEIE ≠ true fraud detection | Find better fraud label sources; or move to fully unsupervised pipeline with no LEIE dependency at any stage |
+| **Supervised feature selection** | AUROC filter against LEIE makes feature selection weakly supervised — contradicts unsupervised framing | Try PCA, UMAP/t-SNE for label-free dimensionality reduction; keep LEIE only as post-hoc eval |
+| **Cohort granularity** | State + entity type may be too coarse — anomalies within large organization cohorts are sparse and hard to detect; pipeline tested on only a few cohorts | Add taxonomy code hierarchy, zip code; cross-cohort analysis; test on larger cohorts |
+| **Data quality** | T-MSIS/Medicaid aggregates have state-level reporting inconsistencies; many months missing or unreported | Already created gap aware features, current pipeline drops insufficent history providers though this depends on cohorts |
+| **Feature engineering** | Entire provider history collapsed to one row — misses temporal fraud patterns (e.g. which month was fraudulent vs. which provider); no categorical features | Add exclusion-date-relative features (months until exclusion); add HCPCS/taxonomy categorical features; explore per-month scoring |
+| **Model scope** | Autoencoder only — MSE is hard to interpret ("why was this flagged?"); isolation forest + one-class SVM tried in MLanomaly.ipynb but not fully explored | Try temporal CNNs; add SHAP for reconstruction-based attribution; compare model families systematically |
+| **No held-out eval** | Every run requires LEIE labels — no validation on label-free data; no prospective eval | Use post-2025 Medicaid deposits as true holdout when available |
+
+**What exists now** — a fast, modular pipeline for testing new methodologies: swap models via Hydra config, track experiments in wandb, scale feature engineering without rewriting training code. The infrastructure is built for iteration — the research questions above are the next step.
+
+---
+
+# AI-tools
+
+- **VSCode + Claude Code** — implementation, scripts, debugging
+- **GPT Deep Research** — research on T-MSIS data structure, Medicaid billing patterns, anomaly detection methods for healthcare claims
 
