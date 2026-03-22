@@ -58,18 +58,39 @@ def compute_lift_at_percentiles(
     return metrics, results_df
 
 
+def build_lift_table(metrics: dict, percentiles: List[float]) -> pd.DataFrame:
+    """Return lift table as a DataFrame (used for saving and printing)."""
+    base_rate = metrics.get("base_rate", float("nan"))
+    n_tot = metrics.get("n_providers", 1)
+    rows = []
+    for pct in percentiles:
+        pct_str = str(pct).replace(".", "_")
+        k = max(1, int(n_tot * pct / 100))
+        hits = metrics.get(f"hits_top_{pct_str}pct", 0)
+        prec = metrics.get(f"precision_top_{pct_str}pct", float("nan"))
+        lift = metrics.get(f"lift_top_{pct_str}pct", float("nan"))
+        expected_hits = round(k * base_rate, 2)
+        rows.append({
+            "top_pct": pct,
+            "k": k,
+            "hits": hits,
+            "expected_hits_random": expected_hits,
+            "precision": prec,
+            "lift": lift,
+        })
+    return pd.DataFrame(rows)
+
+
 def print_lift_table(metrics: dict, percentiles: List[float]) -> None:
     base_rate = metrics.get("base_rate", float("nan"))
     n_pos = metrics.get("n_positive", "?")
     n_tot = metrics.get("n_providers", "?")
     print(f"\nBase rate (LEIE prevalence): {base_rate:.4f}  ({n_pos} positives / {n_tot} total)")
-    print(f"{'Top %':>8}  {'k':>6}  {'Hits':>6}  {'Precision':>10}  {'Lift':>8}")
-    print("-" * 48)
-    for pct in percentiles:
-        pct_str = str(pct).replace(".", "_")
-        n_tot_val = metrics.get("n_providers", 1)
-        k = max(1, int(n_tot_val * pct / 100))
-        hits = metrics.get(f"hits_top_{pct_str}pct", "?")
-        prec = metrics.get(f"precision_top_{pct_str}pct", float("nan"))
-        lift = metrics.get(f"lift_top_{pct_str}pct", float("nan"))
-        print(f"{pct:>7.1f}%  {k:>6}  {hits:>6}  {prec:>10.4f}  {lift:>8.2f}x")
+    print(f"{'Top %':>8}  {'k':>6}  {'Hits':>6}  {'Expected':>10}  {'Precision':>10}  {'Lift':>8}")
+    print("-" * 60)
+    df = build_lift_table(metrics, percentiles)
+    for _, row in df.iterrows():
+        print(
+            f"{row.top_pct:>7.1f}%  {int(row.k):>6}  {int(row.hits):>6}"
+            f"  {row.expected_hits_random:>10.1f}  {row.precision:>10.4f}  {row.lift:>8.2f}x"
+        )

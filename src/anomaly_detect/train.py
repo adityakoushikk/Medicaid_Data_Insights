@@ -22,7 +22,7 @@ from anomaly_detect.data.anomaly_datamodule import AnomalyDataModule
 from anomaly_detect.models.anomaly_module import AnomalyLitModule
 from anomaly_detect.utils.instantiators import instantiate_callbacks
 from anomaly_detect.utils.logging_utils import log_hyperparameters
-from anomaly_detect.utils.metrics import compute_lift_at_percentiles, print_lift_table
+from anomaly_detect.utils.metrics import compute_lift_at_percentiles, print_lift_table, build_lift_table
 
 log = logging.getLogger(__name__)
 
@@ -95,6 +95,7 @@ def train(cfg: DictConfig) -> dict:
         logger.experiment.log({
             "top_500_providers": wandb.Table(dataframe=results_df.head(500))
         })
+        wandb.finish()
 
     # ── Save outputs ──────────────────────────────────────────────────────
     out_dir = Path(cfg.paths.output_dir)
@@ -106,6 +107,10 @@ def train(cfg: DictConfig) -> dict:
     if datamodule.auroc_df is not None:
         datamodule.auroc_df.to_csv(out_dir / "feature_auroc.csv", index=False)
         log.info(f"Feature AUROC → {out_dir / 'feature_auroc.csv'}")
+
+    lift_df = build_lift_table(metrics, percentiles)
+    lift_df.to_csv(out_dir / "lift_table.csv", index=False)
+    log.info(f"Lift table → {out_dir / 'lift_table.csv'}")
 
     print_lift_table(metrics, percentiles)
     return metrics
