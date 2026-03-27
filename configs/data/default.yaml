@@ -17,7 +17,6 @@ provider_level_csv: null
 # These are passed to scripts/create_provider_level_from_month.py as CLI args.
 provider_level_script: ${paths.scripts_dir}/create_provider_level_from_month.py
 min_months: 6
-date_cutoff: "2024-12-31"
 no_filter: false
 
 # ── Provider-level feature engineering (mirrors scripts/config.yaml) ──────────

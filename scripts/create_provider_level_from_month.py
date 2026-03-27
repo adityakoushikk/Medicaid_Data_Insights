@@ -35,7 +35,6 @@ _CONFIG_PATH = Path(__file__).parent / "config.yaml"
 
 #overridden at runtime when --config is passed from the Hydra pipeline.
 _DEFAULT_CONFIG: dict = {
-    "date_cutoff": "2024-12-31",
     "provider_level_features": {
         "min_months_observed": 6,
         "pct_growth_prior_floor": 10.0,
@@ -65,7 +64,6 @@ _cfg_root = _load_config()
 _cfg      = _cfg_root["provider_level_features"]
 
 DEFAULT_OUTPUT_CSV = "provider_level.csv"
-DATE_CUTOFF        = _cfg_root["date_cutoff"]
 MIN_MONTHS_DEFAULT = _cfg["min_months_observed"]
 
 
@@ -483,7 +481,6 @@ def run(
     input_csv: str,
     output_csv: str = DEFAULT_OUTPUT_CSV,
     min_months: int = MIN_MONTHS_DEFAULT,
-    date_cutoff: str = DATE_CUTOFF,
     filter_output: bool = True,
 ) -> pd.DataFrame:
     """Build provider-level features and save CSV.
@@ -491,6 +488,7 @@ def run(
     NaN is never imputed with 0 — undefined features propagate to the output.
     The only hard filter applied is providers whose median paid_t == 0
     (spike_ratio_max_to_median is NaN), which are degenerate for paid-based detection.
+    Date range filtering must be applied upstream in create_provider_month_dataset.py.
     """
     if not RUPTURES_AVAILABLE:
         print("Warning: ruptures not installed — changepoint features will be NaN.\n"
@@ -498,11 +496,6 @@ def run(
 
     df = load_provider_month(input_csv)
     df["month"] = pd.to_datetime(df["month"], errors="coerce")
-
-    cutoff = pd.Timestamp(date_cutoff)
-    before = len(df)
-    df = df[df["month"] <= cutoff]
-    print(f"Date cutoff {date_cutoff}: {before - len(df):,} rows removed, {len(df):,} remaining.")
 
     provider_level = build_provider_level(df, min_months=min_months)
 
@@ -557,8 +550,6 @@ def main():
                         help=f"Output CSV path (default: {DEFAULT_OUTPUT_CSV}).")
     parser.add_argument("--min-months", type=int, default=MIN_MONTHS_DEFAULT,
                         help=f"Threshold for insufficient_history_flag (default: {MIN_MONTHS_DEFAULT}).")
-    parser.add_argument("--date-cutoff", default=DATE_CUTOFF,
-                        help=f"Exclude months after this date (default: {DATE_CUTOFF}).")
     parser.add_argument("--no-filter", action="store_true", default=False,
                         help="Keep all providers in output regardless of months_observed.")
     parser.add_argument("--config", default=None,
@@ -574,7 +565,7 @@ def main():
 
     provider_level = run(
         args.input_csv, args.output,
-        args.min_months, args.date_cutoff,
+        args.min_months,
         filter_output=not args.no_filter,
     )
     print(f"\nColumns ({len(provider_level.columns)}): {list(provider_level.columns)[:10]} ...")

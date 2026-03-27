@@ -50,7 +50,6 @@ class AnomalyDataModule(L.LightningDataModule):
         splitter,
         provider_level_csv: Optional[str] = None,
         min_months: int = 6,
-        date_cutoff: str = "2024-12-31",
         no_filter: bool = False,
         provider_level_features: Optional[dict] = None,
         nan_drop_threshold: float = 0.05,
@@ -109,7 +108,6 @@ class AnomalyDataModule(L.LightningDataModule):
             output_csv=str(out),
             provider_level_script=self.hparams.provider_level_script,
             min_months=self.hparams.min_months,
-            date_cutoff=self.hparams.date_cutoff,
             no_filter=self.hparams.no_filter,
             provider_level_features=self.hparams.provider_level_features,
         )

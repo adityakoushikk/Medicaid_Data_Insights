@@ -1,8 +1,7 @@
 """Build provider-month feature table from raw Medicaid billing data.
 
-Exactly one cohort must be specified via --cohort-csv and --cohorts.
-Raises an error if zero or more than one cohort is passed.
-The cohort_label column is NOT written to the output.
+Filters to a single cohort using --cohort-csv (output of build_provider_cohorts.py)
+and --cohort. Run build_cohorts.sh once first to generate cohort and label CSVs.
 """
 
 import argparse
@@ -327,16 +326,16 @@ def run(
     cohort_csv: str | None = None,
     cohort: str | None = None,
     labels_csv: str | None = None,
+    date_start: str | None = None,
+    date_end: str | None = None,
 ) -> pd.DataFrame:
-    """Load, filter to single cohort, build features, save. Returns provider_month_df."""
+    """Filter to cohort, build provider-month features, save. Returns provider_month_df."""
     if cohort_csv is None or cohort is None:
         raise ValueError(
             "Both --cohort-csv and --cohort are required. "
-            "Run build_provider_cohorts.py first to generate the cohort CSV, "
-            "then pass a single cohort label (e.g. NY_individual)."
+            "Run build_cohorts.sh first to generate cohort and label CSVs."
         )
 
-    # Filter raw billing CSV to the single cohort via DuckDB
     temp_path = tempfile.NamedTemporaryFile(prefix="provider_month_cohort_", suffix=".csv", delete=False).name
     print(f"Filtering raw CSV to cohort '{cohort}'...")
     filter_raw_to_cohort(input_csv, cohort_csv, cohort, temp_path)
@@ -347,6 +346,17 @@ def run(
         Path(temp_path).unlink(missing_ok=True)
 
     df = clean_raw_data(df)
+
+    if date_start is not None:
+        start_ts = pd.Timestamp(date_start)
+        before = len(df)
+        df = df[df["month"] >= start_ts]
+        print(f"Date start {date_start}: {before - len(df):,} rows removed, {len(df):,} remaining.")
+    if date_end is not None:
+        end_ts = pd.Timestamp(date_end)
+        before = len(df)
+        df = df[df["month"] <= end_ts]
+        print(f"Date end {date_end}: {before - len(df):,} rows removed, {len(df):,} remaining.")
     panel = build_provider_month_panel(df, BUILD_BALANCED_PANEL)
     core = compute_core_monthly_aggregates(df)
     code_level = compute_code_level_totals(df)
@@ -384,10 +394,10 @@ def main():
     parser = argparse.ArgumentParser(
         description="Build provider-month feature table for a single cohort."
     )
-    parser.add_argument("input_csv", help="Path to raw billing CSV.")
+    parser.add_argument("input_csv", help="Path to raw Medicaid billing CSV.")
     parser.add_argument(
         "--cohort-csv", required=True,
-        help="Path to provider_cohorts.csv (from build_provider_cohorts.py).",
+        help="Path to provider_cohorts.csv (output of build_cohorts.sh).",
     )
     parser.add_argument(
         "--cohort", required=True,
@@ -401,8 +411,17 @@ def main():
         "--labels-csv", default=None,
         help="Path to provider_labels.csv. If provided, joins label and excldate.",
     )
+    parser.add_argument(
+        "--date-start", default=None,
+        help="Exclude months before this date, e.g. 2020-01-01.",
+    )
+    parser.add_argument(
+        "--date-end", default=None,
+        help="Exclude months after this date, e.g. 2024-12-31.",
+    )
     args = parser.parse_args()
-    run(args.input_csv, args.output, args.cohort_csv, args.cohort, args.labels_csv)
+    run(args.input_csv, args.output, args.cohort_csv, args.cohort,
+        args.labels_csv, args.date_start, args.date_end)
 
 
 if __name__ == "__main__":

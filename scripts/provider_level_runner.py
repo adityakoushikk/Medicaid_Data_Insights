@@ -21,7 +21,6 @@ def run_provider_level(
     output_csv: str,
     provider_level_script: str,
     min_months: int = 6,
-    date_cutoff: str = "2024-12-31",
     no_filter: bool = False,
     provider_level_features: dict | None = None,
     python_exe: str | None = None,
@@ -31,6 +30,7 @@ def run_provider_level(
     If provider_level_features is provided, writes a temp config.yaml
     containing those values and passes --config to the script so that
     rolling_flags, changepoints, etc. are fully controlled from Hydra.
+    Date range filtering is applied upstream in create_provider_month_dataset.py.
     """
     python = python_exe or sys.executable
     script = str(Path(provider_level_script).resolve())
@@ -38,9 +38,8 @@ def run_provider_level(
     cmd = [
         python, script,
         str(input_csv),
-        "--output",      str(output_csv),
-        "--min-months",  str(min_months),
-        "--date-cutoff", str(date_cutoff),
+        "--output",     str(output_csv),
+        "--min-months", str(min_months),
     ]
     if no_filter:
         cmd.append("--no-filter")
@@ -54,7 +53,7 @@ def run_provider_level(
         )
         features_plain = OmegaConf.to_container(provider_level_features, resolve=True)
         yaml.dump(
-            {"date_cutoff": date_cutoff, "provider_level_features": features_plain},
+            {"provider_level_features": features_plain},
             tmp,
         )
         tmp.flush()
