@@ -156,22 +156,120 @@ class AnomalyDataModule(L.LightningDataModule):
 
         return list(X.columns)
 
-    def _select_features(self, X: pd.DataFrame, y: np.ndarray) -> List[str]:
-        """Select features by AUROC threshold, or unsupervised if no labels or explicitly configured.
+    # ── Group definitions for grouped feature selection ───────────────────────
+    _FEATURE_GROUPS = {
+        "A": ["paid_t", "claims_t", "hcpcs_count_t", "beneficiaries_proxy_t"],
+        "B": ["paid_per_claim_t", "claims_per_beneficiary_proxy_t", "paid_per_beneficiary_proxy_t"],
+        "C": ["top_code_paid_share", "top_3_code_paid_share", "hcpcs_entropy", "hcpcs_hhi"],
+        "D": ["top_code_claim_share_t", "top_3_code_claim_share_t", "hcpcs_claim_entropy_t", "hcpcs_claim_hhi_t"],
+        "E": ["top_code_beneficiary_share_t", "top_3_code_beneficiary_share_t", "hcpcs_beneficiary_entropy_t", "hcpcs_beneficiary_hhi_t"],
+        "F": ["top_code_paid_minus_claim_share_t", "top_code_paid_minus_beneficiary_share_t", "hcpcs_paid_hhi_minus_claim_hhi_t"],
+    }
 
-        Unsupervised mode: drop near-constant features, then correlation-prune.
-        AUROC mode: filter by univariate roc_auc_score against exclusion labels.
-        Unsupervised is used automatically when no positive labels exist, or when
-        feature_selection.unsupervised=true is set in config.
-        """
+    def _assign_feature_groups(self, features: List[str]) -> dict:
+        """Map each feature name to a group label. Longest source prefix wins."""
+        # Build sorted lookup: longest monthly col name first to prevent prefix theft
+        lookup = []
+        for group, cols in self._FEATURE_GROUPS.items():
+            for col in cols:
+                lookup.append((col, group))
+        lookup.sort(key=lambda x: len(x[0]), reverse=True)
+
+        assignment = {}
+        for feat in features:
+            for col, group in lookup:
+                if feat.startswith(col):
+                    assignment[feat] = group
+                    break
+        return assignment  # unmatched features are omitted
+
+    def _select_features_grouped(self, X: pd.DataFrame, y: np.ndarray) -> List[str]:
+        """Per-group pipeline: const filter → corr filter → top-N by AUROC."""
+        top_n = self.feature_selection.get("top_n_per_group", 5)
+        const_threshold = self.feature_selection.get("const_threshold", 0.05)
+        corr_threshold = self.feature_selection.get("corr_threshold", 0.9)
+        has_labels = len(np.unique(y)) >= 2
+
+        assignment = self._assign_feature_groups(list(X.columns))
+        groups: dict[str, List[str]] = {}
+        for feat, grp in assignment.items():
+            groups.setdefault(grp, []).append(feat)
+
+        all_rows = []
+        selected = []
+
+        for grp in sorted(groups.keys()):
+            feats = groups[grp]
+            Xg = X[feats]
+
+            # Constant filter
+            std = Xg.std(skipna=True)
+            Xg = Xg.loc[:, std >= const_threshold]
+            if Xg.empty:
+                continue
+
+            # Correlation filter
+            corr = Xg.corr().abs()
+            upper = corr.where(np.triu(np.ones(corr.shape), k=1).astype(bool))
+            drop_corr = [c for c in upper.columns if any(upper[c] > corr_threshold)]
+            Xg = Xg.drop(columns=drop_corr)
+            if Xg.empty:
+                continue
+
+            survivors = list(Xg.columns)
+
+            if not has_labels:
+                # No labels — take first top_n survivors
+                chosen = survivors[:top_n]
+                for f in chosen:
+                    all_rows.append({"feature": f, "auroc": float("nan"), "group": grp})
+                selected.extend(chosen)
+                continue
+
+            # AUROC ranking
+            rows = []
+            for feat in survivors:
+                series = Xg[feat].values
+                valid_mask = ~np.isnan(series)
+                xv, yv = series[valid_mask], y[valid_mask]
+                if len(np.unique(yv)) < 2:
+                    continue
+                try:
+                    auc = roc_auc_score(yv, xv)
+                    auc = max(auc, 1 - auc)
+                    rows.append({"feature": feat, "auroc": round(float(auc), 4), "group": grp})
+                except Exception:
+                    continue
+
+            rows.sort(key=lambda r: r["auroc"], reverse=True)
+            chosen = [r["feature"] for r in rows[:top_n]]
+            all_rows.extend(rows)
+            selected.extend(chosen)
+            log.info(f"Group {grp}: {len(chosen)}/{len(survivors)} features selected (top {top_n} by AUROC).")
+
+        self.auroc_df = (
+            pd.DataFrame(all_rows)
+            .sort_values(["group", "auroc"], ascending=[True, False])
+            .reset_index(drop=True)
+        )
+        log.info(f"Grouped selection: {len(selected)} features across {len(groups)} groups.")
+        return selected
+
+    def _select_features(self, X: pd.DataFrame, y: np.ndarray) -> List[str]:
+        """Dispatch to the configured feature selection method."""
         use_unsupervised = self.feature_selection.get("unsupervised", False)
         has_labels = len(np.unique(y)) >= 2
+        method = self.feature_selection.get("method", "auroc")
 
         if use_unsupervised or not has_labels:
             if not has_labels and not use_unsupervised:
                 log.warning("No positive labels found — falling back to unsupervised feature selection.")
             return self._select_features_unsupervised(X)
 
+        if method == "demo":
+            return self._select_features_grouped(X, y)
+
+        # Default: flat top-N by AUROC
         top_n = self.feature_selection.get("auroc_top_n")
         if top_n is None:
             log.info(f"Feature selection disabled — keeping all {len(X.columns)} features.")
